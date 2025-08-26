@@ -1,0 +1,6 @@
+python-telegram-bot==21.4
+pdfminer.six==20231228
+PyPDF2==3.0.1
+python-dotenv==1.0.1
+Spire.Xls.Free==14.12.4
+selenium==4.23.1

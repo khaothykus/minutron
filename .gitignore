@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+/app/data/
+/app/__init__.py
+*.log
+*.pdf
+*.xlsx
+wheels/
