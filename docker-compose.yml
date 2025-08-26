@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     volumes:
+      - ./app:/app
       - ./app/data:/app/data
       - ./app/templates:/app/templates:ro
     restart: unless-stopped

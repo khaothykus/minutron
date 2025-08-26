@@ -1,5 +1,5 @@
 import os, asyncio, traceback
-from telegram import Update, InputFile
+from telegram import Update, InputFile, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from config import BOT_TOKEN, ADMIN_TELEGRAM_ID
 from services import storage, danfe_parser
@@ -14,11 +14,34 @@ SESS = {}  # {tg_id: {"qlid":"", "cidade":"", "blocked": False, "sid": "", "volb
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     qlid, rec = storage.users_find_by_tg(u.id)
+
     if rec:
-        SESS[u.id] = {"qlid": qlid, "cidade": rec.get("cidade",""), "blocked": rec.get("blocked", False), "sid":"", "volbuf":"", "data":""}
+        SESS[u.id] = {
+            "qlid": qlid,
+            "cidade": rec.get("cidade", ""),
+            "blocked": rec.get("blocked", False),
+            "sid": "",
+            "volbuf": "",
+            "data": ""
+        }
+        await update.message.reply_text(
+            f"Bem-vindo de volta, {u.first_name}! Seu QLID é {qlid} e sua cidade é {rec.get('cidade')}.",
+            reply_markup=kb_main()
+        )
     else:
-        SESS[u.id] = {"qlid":"", "cidade":"", "blocked": False, "sid":"", "volbuf":"", "data":""}
-    await update.message.reply_text(f"Olá, {u.first_name}! Vamos configurar seu acesso.", reply_markup=kb_cadastro())
+        SESS[u.id] = {
+            "qlid": "",
+            "cidade": "",
+            "blocked": False,
+            "sid": "",
+            "volbuf": "",
+            "data": ""
+        }
+        await update.message.reply_text(
+            f"Olá, {u.first_name}! Vamos configurar seu acesso.",
+            reply_markup=kb_cadastro()
+        )
+
 
 # ADMIN
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,9 +89,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             st["qlid"] = q
             storage.users_upsert(q, {"telegram_id": uid, "cidade": st.get("cidade",""), "blocked": False})
-            await msg.reply_text("QLID cadastrado.", reply_markup=kb_cadastro())
+            await msg.reply_text("QLID cadastrado.")
+
+            # Já emenda pedindo a cidade
+            context.user_data["awaiting_cidade"] = True
+            await msg.reply_text("Agora envie sua Cidade (apenas letras e espaços).")
         context.user_data["awaiting_qlid"] = False
         return
+
+    # if context.user_data.get("awaiting_qlid"):
+    #     q = msg.text.strip().upper()
+    #     if not valida_qlid(q):
+    #         await msg.reply_text("QLID inválido. Use o formato AA999999.")
+    #     else:
+    #         st["qlid"] = q
+    #         storage.users_upsert(q, {"telegram_id": uid, "cidade": st.get("cidade",""), "blocked": False})
+    #         await msg.reply_text("QLID cadastrado.", reply_markup=kb_cadastro())
+    #     context.user_data["awaiting_qlid"] = False
+    #     return
 
     if context.user_data.get("awaiting_cidade"):
         c = msg.text.strip()
@@ -82,6 +120,55 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"Cidade definida: {st['cidade']}", reply_markup=kb_main())
         context.user_data["awaiting_cidade"] = False
         return
+
+    text = msg.text.strip()
+
+    if text == "Cadastrar QLID":
+        await msg.reply_text("Envie seu QLID (AA999999) como mensagem.")
+        context.user_data["awaiting_qlid"] = True
+        return
+
+    if text == "Cadastrar Cidade":
+        await msg.reply_text("Envie sua Cidade (apenas letras e espaços) como mensagem.")
+        context.user_data["awaiting_cidade"] = True
+        return
+
+    if text == "Gerar minuta":
+        st = SESS.get(msg.from_user.id)
+        sid = st.get("sid")
+        if not sid:
+            await msg.reply_text("⚠️ Você ainda não anexou nenhuma DANFE. Envie os arquivos antes de gerar a minuta.")
+            return
+
+        pdfs_dir = f"{storage.user_dir(st['qlid'])}/temp/{sid}/pdfs"
+        pdfs = [f for f in os.listdir(pdfs_dir) if f.lower().endswith(".pdf")] if os.path.exists(pdfs_dir) else []
+
+        if not pdfs:
+            await msg.reply_text("⚠️ Nenhuma DANFE encontrada no lote atual. Envie os arquivos antes de gerar a minuta.")
+            return
+
+        await msg.reply_text("Escolha a data:", reply_markup=kb_datas())
+        return
+
+    if text == "Minhas minutas":
+        st = SESS.get(msg.from_user.id)
+        if not st.get("qlid"):
+            await msg.reply_text("Cadastre um QLID primeiro.", reply_markup=kb_cadastro())
+            return
+        files = storage.list_minutas(st["qlid"])
+        if not files:
+            await msg.reply_text("Você ainda não tem minutas geradas.")
+            return
+        with open(files[0], "rb") as f:
+            await msg.reply_document(f, filename=os.path.basename(files[0]))
+        return
+
+    if text == "Alterar cidade":
+        await msg.reply_text("Envie sua nova Cidade (apenas letras e espaços).")
+        context.user_data["awaiting_cidade"] = True
+        return
+
+
 
     # Chat limpo
     await msg.delete()
@@ -136,6 +223,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_cidade"] = True
         return
     if cq.data == "gerar_minuta":
+        sid = st.get("sid")
+        if not sid:
+            await cq.message.edit_text("⚠️ Você ainda não anexou nenhuma DANFE. Envie os arquivos antes de gerar a minuta.")
+            return
+
+        pdfs_dir = f"{storage.user_dir(st['qlid'])}/temp/{sid}/pdfs"
+        pdfs = [f for f in os.listdir(pdfs_dir) if f.lower().endswith(".pdf")] if os.path.exists(pdfs_dir) else []
+
+        if not pdfs:
+            await cq.message.edit_text("⚠️ Nenhuma DANFE encontrada no lote atual. Envie os arquivos antes de gerar a minuta.")
+            return
+            
         await cq.message.edit_text("Escolha a data:", reply_markup=kb_datas())
         return
     if cq.data.startswith("data_"):
@@ -207,7 +306,8 @@ async def processar_lote(cq, st, volumes: int):
         await cq.message.reply_text("Preenchendo template e gerando PDF…")
         await asyncio.to_thread(preencher_e_exportar_lote, qlid, st["cidade"], header, produtos, st["data"], volumes, out_pdf)
 
-        await cq.message.reply_document(InputFile(out_pdf), caption="Sua minuta está pronta.")
+        with open(out_pdf, "rb") as f:
+            await cq.message.reply_document(InputFile(f, filename=os.path.basename(out_pdf)), caption="Sua minuta está pronta.")
     except Exception as e:
         await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}")
         traceback.print_exc()

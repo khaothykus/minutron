@@ -7,6 +7,10 @@ WORKDIR /app
 
 # Instala dependências do sistema, Firefox ESR e geckodriver
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu \
+    fonts-liberation \
+    fonts-freefont-ttf \
+    libicu-dev \
     firefox-esr \
     wget \
     gnupg \
@@ -27,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
     libcups2 \
+    **libicu-dev** \
     && rm -rf /var/lib/apt/lists/*
 
 # Instala geckodriver versão fixa (v0.33.0)
@@ -39,7 +44,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia código da aplicação
-COPY app/ /app/
+#COPY app/ /app/
 
 # Garante estrutura de dados
 RUN mkdir -p /app/data/users /app/data/logs
