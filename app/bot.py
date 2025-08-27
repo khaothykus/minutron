@@ -289,6 +289,9 @@ async def processar_lote(cq, st, volumes: int):
     try:
         await cq.message.edit_text(f"Lendo {len(pdfs)} DANFEs…")
         header, produtos = danfe_parser.parse_lote(pdfs)
+        print("📦 Header extraído:")
+        for k, v in header.items():
+            print(f"{k}: {v}")
 
         await cq.message.reply_text("Fazendo scraping do RAT… isso pode levar alguns minutos.")
         for p in produtos:

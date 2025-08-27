@@ -1,0 +1,74 @@
+import pdfplumber
+import re
+from services.danfe_parser import (
+    extrair_emitente_por_layout,
+    extrair_produtos_tabela,
+    extrair_endereco_emitente_por_tabela,
+    extrair_remetente,
+    extrair_transportador,
+    extrair_remetente_por_tabela,
+    extrair_transportador_por_tabela,
+     extrair_nome_emitente_por_tabela
+)
+
+pdf_path = "app/data/users/RP250439/temp/4cccb8c0/pdfs/35250833033440001176550010011077401767984857.PDF"
+
+with pdfplumber.open(pdf_path) as pdf:
+    texto = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+    tabelas = [table for page in pdf.pages for table in page.extract_tables()]
+    emitente = extrair_emitente_por_layout(texto)
+
+# Extrair emitente
+emitente = extrair_emitente_por_layout(texto)
+emitente.update(extrair_endereco_emitente_por_tabela(tabelas))
+emitente.update(extrair_remetente(texto))
+emitente["transportador"] = extrair_transportador(texto)
+
+emitente.update(extrair_remetente_por_tabela(tabelas))
+emitente["transportador"] = extrair_transportador_por_tabela(tabelas)
+emitente["nome_emitente"] = extrair_nome_emitente_por_tabela(tabelas)
+
+
+
+#produtos = parse_produtos(texto)
+produtos = extrair_produtos_tabela(pdf_path, texto)
+
+endereco_emitente = extrair_endereco_emitente_por_tabela(tabelas)
+emitente.update(endereco_emitente)
+
+print("🔹 Emitente:")
+for k, v in emitente.items():
+    print(f"{k}: {v}")
+
+print("\n🔹 Produtos:")
+for p in produtos:
+    print(p)
+
+print("\n🔍 Texto extraído:")
+print(texto[:2000])
+
+pos = texto.find("PG42335677")
+print("\n🔍 Trecho ao redor da ocorrência:")
+print(texto[pos-200:pos+300])
+
+for m in re.finditer(r"ITEM:\d{6}", texto):
+    print("\n🔍 Bloco completo do produto:")
+    print(texto[m.start():m.start()+500])
+
+print("\n🔍 Trecho com possíveis produtos:")
+print(texto[1000:2000])
+
+
+if "CÓDIGO" in texto or "DESCRIÇÃO" in texto or "VALOR UNIT" in texto:
+    print("🔍 Parece haver uma tabela de produtos no texto.")
+else:
+    print("❌ Nenhuma tabela de produtos visível no texto extraído.")
+
+
+with pdfplumber.open(pdf_path) as pdf:
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            print("\n🔍 Tabela encontrada:")
+            for row in table:
+                print(row)

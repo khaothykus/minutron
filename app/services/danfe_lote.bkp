@@ -1,0 +1,25 @@
+from pdfminer.high_level import extract_text
+from services.danfe_utils import _first
+from services.danfe_regex import RX_NUMNF
+from services.danfe_emitente import extrair_emitente_basico
+from services.danfe_produtos import parse_produtos
+import pdfplumber
+from services.danfe_parser import extrair_danfe_completa
+
+def parse_lote(pdf_paths: list[str]) -> tuple[dict, list[dict]]:
+    header = None
+    all_prod = []
+
+    for i, path in enumerate(pdf_paths):
+        with pdfplumber.open(path) as pdf:
+            texto = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+            tabelas = [table for page in pdf.pages for table in page.extract_tables()]
+
+        if i == 0:
+            header, _ = extrair_danfe_completa(path, texto, tabelas)
+
+        _, produtos = extrair_danfe_completa(path, texto, tabelas)
+        all_prod.extend(produtos)
+
+    return header or {}, all_prod
+
