@@ -146,7 +146,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"telegram_id": uid, "cidade": st["cidade"], "blocked": False},
                 )
             await msg.reply_text(
-                f"Cidade definida: {st['cidade']}", reply_markup=kb_main()
+                # f"Cidade definida: {st['cidade']}", reply_markup=kb_main()
+                f"Cidade definida: {st['cidade']}. Agora você pode enviar as DANFEs (PDFs) para começar."
             )
         context.user_data["awaiting_cidade"] = False
         return
@@ -154,7 +155,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
 
     if text == "Cadastrar QLID":
-        await msg.reply_text("Envie seu QLID (AA999999) como mensagem.")
+        await msg.reply_text("Envie seu QLID (Sem o 'C', ex: AB123456).")
         context.user_data["awaiting_qlid"] = True
         return
 
@@ -213,17 +214,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Chat limpo
     await msg.delete()
 
+
 from datetime import datetime
+
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     u = msg.from_user
-    st = SESS.setdefault(u.id, {
-        "qlid": "", "cidade": "", "blocked": False,
-        "sid": "", "volbuf": "", "data": "",
-        "progress_msg_id": None,
-        "progress_sid": None
-    })
+    st = SESS.setdefault(
+        u.id,
+        {
+            "qlid": "",
+            "cidade": "",
+            "blocked": False,
+            "sid": "",
+            "volbuf": "",
+            "data": "",
+            "progress_msg_id": None,
+            "progress_sid": None,
+        },
+    )
 
     if st["blocked"]:
         await msg.delete()
@@ -233,7 +243,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=msg.chat.id,
             text="⚠️ Finalize o cadastro primeiro.",
-            reply_markup=kb_cadastro()
+            reply_markup=kb_cadastro(),
         )
         await msg.delete()
         return
@@ -241,8 +251,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = msg.document
     if not doc.file_name.lower().endswith(".pdf"):
         await context.bot.send_message(
-            chat_id=msg.chat.id,
-            text="Envie apenas arquivos PDF."
+            chat_id=msg.chat.id, text="Envie apenas arquivos PDF."
         )
         await msg.delete()
         return
@@ -257,13 +266,15 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not danfe_parser.is_danfe(dest):
         await context.bot.send_message(
             chat_id=msg.chat.id,
-            text="❌ Arquivo não é uma DANFE válida. Tente outro PDF."
+            text="❌ Arquivo não é uma DANFE válida. Tente outro PDF.",
         )
         os.remove(dest)
         await msg.delete()
         return
 
-    count = len([f for f in os.listdir(os.path.dirname(dest)) if f.lower().endswith(".pdf")])
+    count = len(
+        [f for f in os.listdir(os.path.dirname(dest)) if f.lower().endswith(".pdf")]
+    )
     # Antes de montar o texto
     last_count = st.get("last_danfe_count", 0)
 
@@ -274,7 +285,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Atualiza o contador salvo
     st["last_danfe_count"] = count
-    
+
     text = (
         f"📄 Recebidas {count} DANFE{'s' if count > 1 else ''}.\n\n"
         "Envie mais DANFEs ou toque abaixo para gerar a minuta."
@@ -293,7 +304,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=msg.chat.id,
                 message_id=msg_id,
                 text=text,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
             st["progress_text"] = text
             print(f"[DEBUG] Editou mensagem {msg_id} com {count} DANFEs")
@@ -302,15 +313,14 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"[DEBUG] Falha ao editar mensagem {msg_id}: {e}")
         new_msg = await context.bot.send_message(
-            chat_id=msg.chat.id,
-            text=text,
-            reply_markup=reply_markup
+            chat_id=msg.chat.id, text=text, reply_markup=reply_markup
         )
         st["progress_msg_id"] = new_msg.message_id
         st["progress_sid"] = sid_now
         print(f"[DEBUG] Criou nova mensagem {new_msg.message_id} após falha")
 
     await msg.delete()
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
@@ -328,7 +338,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if cq.data == "cad_cidade":
         await cq.message.edit_text(
-            "Envie sua Cidade (apenas letras e espaços) como mensagem."
+            "Envie sua Cidade como mensagem."
         )
         context.user_data["awaiting_cidade"] = True
         return
@@ -369,10 +379,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Evita edição se o texto já está igual
         if cq.message.text != novo_texto:
-            await cq.message.edit_text(
-                novo_texto,
-                reply_markup=kb_volumes()
-            )
+            await cq.message.edit_text(novo_texto, reply_markup=kb_volumes())
         return
 
     if cq.data.startswith("vol_"):
@@ -384,10 +391,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data_br = datetime.strptime(st["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
                 await cq.message.edit_text(
                     f"Data escolhida: {data_br}\nVolumes deve ser inteiro > 0.",
-                    reply_markup=kb_volumes(st["volbuf"])
+                    reply_markup=kb_volumes(st["volbuf"]),
                 )
                 return
-            await processar_lote(cq, st, int(vol))
+            await processar_lote(cq, context, st, int(vol))
             return
         else:
             st["volbuf"] = (st.get("volbuf", "") + cq.data.split("_")[1])[:4]
@@ -397,12 +404,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if cq.message.text != novo_texto:
             await cq.message.edit_text(
-                novo_texto,
-                reply_markup=kb_volumes(st["volbuf"])
+                novo_texto, reply_markup=kb_volumes(st["volbuf"])
             )
         return
     if cq.data == "alterar_cidade":
-        await cq.message.edit_text("Envie sua nova Cidade (apenas letras e espaços).")
+        await cq.message.edit_text("Envie sua nova Cidade.")
         context.user_data["awaiting_cidade"] = True
         return
     if cq.data == "minhas_minutas":
@@ -419,7 +425,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cq.message.reply_document(f, filename=os.path.basename(files[0]))
         return
 
-async def processar_lote(cq, st, volumes: int):
+
+async def processar_lote(cq, context, st, volumes: int):
     chat_id = cq.message.chat.id
     qlid = st["qlid"]
     sid = st.get("sid")
@@ -435,10 +442,16 @@ async def processar_lote(cq, st, volumes: int):
         return
 
     try:
-        await cq.message.edit_text(f"Lendo {len(pdfs)} DANFEs…")
+        # Mensagem de leitura
+        msg_lendo = await cq.message.reply_text(f"Lendo {len(pdfs)} DANFEs…")
+        st.setdefault("cleanup_ids", []).append(msg_lendo.message_id)
+
         header, produtos = danfe_parser.parse_lote(pdfs)
 
-        await cq.message.reply_text("Fazendo a busca do RAT… isso pode levar alguns minutos.")
+        # Mensagem de busca do RAT
+        msg_rat = await cq.message.reply_text("Fazendo a busca do RAT… isso pode levar alguns minutos.")
+        st["cleanup_ids"].append(msg_rat.message_id)
+
         for p in produtos:
             if not p.get("ocorrencia"):
                 p["ocorrencia"] = "-"
@@ -454,14 +467,30 @@ async def processar_lote(cq, st, volumes: int):
             p["rat"] = rat
 
         out_pdf = storage.output_pdf_path(qlid)
-        await cq.message.reply_text("Preenchendo a minuta e gerando PDF…")
+
+        # Mensagem de geração
+        msg_gerando = await cq.message.reply_text("Preenchendo template e gerando PDF…")
+        st["cleanup_ids"].append(msg_gerando.message_id)
+
         await asyncio.to_thread(
             preencher_e_exportar_lote,
             qlid, st["cidade"], header, produtos, st["data"], volumes, out_pdf
         )
 
+        # Limpa mensagens anteriores
+        ids = st.get("cleanup_ids", [])
+        if st.get("progress_msg_id"):
+            ids.append(st["progress_msg_id"])
+
+        for mid in ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception as e:
+                print(f"[DEBUG] Falha ao apagar mensagem {mid}: {e}")
+
+        # Envia a minuta final
         with open(out_pdf, "rb") as f:
-            await cq.message.reply_document(InputFile(f, filename=os.path.basename(out_pdf)), caption="Sua minuta está pronta.")
+            await cq.message.reply_document(InputFile(f, filename=os.path.basename(out_pdf)), caption="✅ Sua minuta está pronta. Caso precise, envie mais DANFEs para gerar outra.")
     except Exception as e:
         await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}")
         traceback.print_exc()
@@ -473,6 +502,7 @@ async def processar_lote(cq, st, volumes: int):
         st.pop("progress_msg_id", None)
         st.pop("progress_sid", None)
         st.pop("progress_text", None)
+        st.pop("cleanup_ids", None)
         st.pop("last_danfe_count", None)
 
 def main():
@@ -485,6 +515,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.PDF, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
