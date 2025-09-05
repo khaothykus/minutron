@@ -44,7 +44,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia código da aplicação
-#COPY app/ /app/
+# COPY . /app
+# WORKDIR /app
 
 # Garante estrutura de dados
 RUN mkdir -p /app/data/users /app/data/logs
