@@ -6,6 +6,7 @@ from telegram import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    BotCommandScopeDefault,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,7 +22,7 @@ from services import storage, danfe_parser
 from services.excel_filler_spire import preencher_e_exportar_lote
 from services.rat_search import get_rat_for_ocorrencia
 from services.validators import valida_qlid, valida_cidade
-from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes, kb_opcoes, kb_menu
+from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes, kb_opcoes
 
 # Sessões em memória por Telegram ID
 SESS = (
@@ -98,7 +99,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👋 Bem-vindo, {u.first_name}!\n\n"
                 # f"Seu QLID é {qlid} e a cidade para a minuta é {rec.get('cidade')}.\n\n"
                 f"Envie suas DANFEs ou toque em 📋 Menu para mais opções."
-            ),reply_markup=kb_menu()
+            ),#reply_markup=kb_menu()
         )
 
     else:
@@ -423,7 +424,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cq.data == "fechar_opcoes":
         await cq.message.edit_text(
             "✅ Pronto para continuar. Envie suas DANFEs ou toque em 📋 Menu para mais opções.",
-            reply_markup=kb_menu()
+            #reply_markup=kb_menu()
         )
         return
     if cq.data == "gerar_minuta":
@@ -657,13 +658,16 @@ async def processar_lote(cq, context, st, volumes: int):
 
 
 async def set_bot_commands(app):
-    await app.bot.set_my_commands([
-        BotCommand("start", "Iniciar o bot"),
-        BotCommand("opcoes", "Mostrar opções"),
-        BotCommand("minutas", "Listar minutas anteriores"),
-        BotCommand("alterar", "Alterar cidade"),
-        BotCommand("cancelar", "Fechar menus ou teclados")
-    ])
+    await app.bot.set_my_commands(
+        commands=[
+            BotCommand("start", "Iniciar o bot"),
+            BotCommand("opcoes", "Mostrar opções"),
+            BotCommand("minutas", "Listar minutas anteriores"),
+            BotCommand("alterar", "Alterar cidade"),
+            BotCommand("cancelar", "Fechar menus ou teclados")
+        ],
+        scope=BotCommandScopeDefault()
+    )
 
 def main():
     app = (
@@ -676,6 +680,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("opcoes", opcoes))
+    app.add_handler(CommandHandler("minutas", minutas))
+    app.add_handler(CommandHandler("alterar", alterar))
+    app.add_handler(CommandHandler("cancelar", cancelar))
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CallbackQueryHandler(on_callback))

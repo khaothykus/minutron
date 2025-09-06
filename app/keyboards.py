@@ -45,12 +45,12 @@ def kb_volumes(volbuf=""):
     ]
     return InlineKeyboardMarkup(rows)
 
-def kb_menu():
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📋 Menu")]],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
+# def kb_menu():
+#     return ReplyKeyboardMarkup(
+#         [[KeyboardButton("📋 Menu")]],
+#         resize_keyboard=True,
+#         one_time_keyboard=False
+#     )
 
 def kb_opcoes():
     return InlineKeyboardMarkup([
