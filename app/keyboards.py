@@ -1,13 +1,11 @@
 from datetime import datetime, timedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
 # def kb_main():
 #     return ReplyKeyboardMarkup([["Gerar minuta"], ["Minhas minutas"], ["Alterar cidade"]], resize_keyboard=True)
 
 # def kb_cadastro():
 #     return ReplyKeyboardMarkup([["Cadastrar QLID"], ["Cadastrar Cidade"]], resize_keyboard=True)
-
 
 def kb_cadastro():
     return InlineKeyboardMarkup([
@@ -46,3 +44,17 @@ def kb_volumes(volbuf=""):
          InlineKeyboardButton("OK", callback_data=f"vol_ok")]
     ]
     return InlineKeyboardMarkup(rows)
+
+def kb_menu():
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📋 Menu")]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+def kb_opcoes():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Minhas minutas", callback_data="minhas_minutas")],
+        [InlineKeyboardButton("🏙️ Alterar cidade", callback_data="alterar_cidade")],
+        [InlineKeyboardButton("❌ Fechar", callback_data="fechar_opcoes")]
+    ])

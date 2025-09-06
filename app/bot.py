@@ -1,5 +1,12 @@
 import os, asyncio, traceback
-from telegram import Update, InputFile, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    InputFile,
+    BotCommand,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -8,17 +15,62 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
 from config import BOT_TOKEN, ADMIN_TELEGRAM_ID
 from services import storage, danfe_parser
 from services.excel_filler_spire import preencher_e_exportar_lote
 from services.rat_search import get_rat_for_ocorrencia
 from services.validators import valida_qlid, valida_cidade
-from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes
+from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes, kb_opcoes, kb_menu
 
 # Sessões em memória por Telegram ID
 SESS = (
     {}
 )  # {tg_id: {"qlid":"", "cidade":"", "blocked": False, "sid": "", "volbuf":"", "data":"", "msg_recebimento_id": int}}
+
+
+# async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     u = update.effective_user
+#     qlid, rec = storage.users_find_by_tg(u.id)
+
+#     # Preserva msg_recebimento_id se já existir
+#     prev = SESS.get(u.id, {})
+#     msg_id = prev.get("msg_recebimento_id")
+
+#     if rec:
+#         SESS[u.id] = {
+#             "qlid": qlid,
+#             "cidade": rec.get("cidade", ""),
+#             "blocked": rec.get("blocked", False),
+#             "sid": "",
+#             "volbuf": "",
+#             "data": "",
+#             "msg_recebimento_id": msg_id,  # preservado
+#         }
+#         # await update.message.reply_text(
+#         #     f"Bem-vindo de volta, {u.first_name}! Seu QLID é {qlid} e a cidade para a minuta é {rec.get('cidade')}. Anexe as DANFEs para começar.",
+#         #     # reply_markup=kb_main(),
+#         # )
+#         await context.bot.send_message(
+#             chat_id=update.effective_chat.id,
+#             text="👋 Bem-vindo! Envie suas DANFEs para gerar uma minuta ou acesse opções abaixo:",
+#             reply_markup=kb_opcoes()
+#         )
+
+#     else:
+#         SESS[u.id] = {
+#             "qlid": "",
+#             "cidade": "",
+#             "blocked": False,
+#             "sid": "",
+#             "volbuf": "",
+#             "data": "",
+#             "msg_recebimento_id": None,
+#         }
+#         await update.message.reply_text(
+#             f"Olá, {u.first_name}! Vamos configurar seu acesso.",
+#             reply_markup=kb_cadastro(),
+#         )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,10 +91,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "data": "",
             "msg_recebimento_id": msg_id,  # preservado
         }
-        await update.message.reply_text(
-            f"Bem-vindo de volta, {u.first_name}! Seu QLID é {qlid} e a cidade para a minuta é {rec.get('cidade')}. Anexe as DANFEs para começar.",
-            # reply_markup=kb_main(),
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"👋 Bem-vindo, {u.first_name}!\n\n"
+                # f"Seu QLID é {qlid} e a cidade para a minuta é {rec.get('cidade')}.\n\n"
+                f"Envie suas DANFEs ou toque em 📋 Menu para mais opções."
+            ),reply_markup=kb_menu()
         )
+
     else:
         SESS[u.id] = {
             "qlid": "",
@@ -53,10 +111,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "data": "",
             "msg_recebimento_id": None,
         }
+
         await update.message.reply_text(
             f"Olá, {u.first_name}! Vamos configurar seu acesso.",
             reply_markup=kb_cadastro(),
         )
+
+
+# OPÇÕES
+async def opcoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚙️ O que você deseja fazer?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📂 Minhas minutas", callback_data="minhas_minutas"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏙️ Alterar cidade", callback_data="alterar_cidade"
+                    )
+                ],
+            ]
+        ),
+    )
 
 
 # ADMIN
@@ -147,7 +227,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             await msg.reply_text(
                 # f"Cidade definida: {st['cidade']}", reply_markup=kb_main()
-                f"Cidade definida: {st['cidade']}. Agora você pode enviar as DANFEs (PDFs) para começar."
+                f"Cidade definida: {st['cidade']}.\nAgora é só você enviar as DANFEs (PDFs) para gerar a minuta!."
             )
         context.user_data["awaiting_cidade"] = False
         return
@@ -337,10 +417,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_qlid"] = True
         return
     if cq.data == "cad_cidade":
-        await cq.message.edit_text(
-            "Envie sua Cidade como mensagem."
-        )
+        await cq.message.edit_text("Envie sua Cidade como mensagem.")
         context.user_data["awaiting_cidade"] = True
+        return
+    if cq.data == "fechar_opcoes":
+        await cq.message.edit_text(
+            "✅ Pronto para continuar. Envie suas DANFEs ou toque em 📋 Menu para mais opções.",
+            reply_markup=kb_menu()
+        )
         return
     if cq.data == "gerar_minuta":
         # Sem DANFEs, pede para enviar
@@ -394,6 +478,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=kb_volumes(st["volbuf"]),
                 )
                 return
+
+            # Remove o teclado antes de processar
+            try:
+                await cq.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                print(f"[DEBUG] Falha ao remover teclado: {e}")
+
+            # Inicia o processamento
             await processar_lote(cq, context, st, int(vol))
             return
         else:
@@ -407,22 +499,60 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 novo_texto, reply_markup=kb_volumes(st["volbuf"])
             )
         return
+    # if cq.data == "alterar_cidade":
+    #     await cq.message.edit_text("Envie sua nova Cidade.")
+    #     context.user_data["awaiting_cidade"] = True
+    #     return
+    # if cq.data == "minhas_minutas":
+    #     if not st.get("qlid"):
+    #         await cq.message.edit_text(
+    #             "Cadastre um QLID primeiro.", reply_markup=kb_cadastro()
+    #         )
+    #         return
+    #     files = storage.list_minutas(st["qlid"])
+    #     if not files:
+    #         await cq.message.edit_text("Você ainda não tem minutas geradas.")
+    #         return
+    #     with open(files[0], "rb") as f:
+    #         await cq.message.reply_document(f, filename=os.path.basename(files[0]))
+    #     return
     if cq.data == "alterar_cidade":
-        await cq.message.edit_text("Envie sua nova Cidade.")
+        msg = await cq.message.edit_text(
+            "🏙️ Envie sua nova Cidade (apenas letras e espaços)."
+        )
         context.user_data["awaiting_cidade"] = True
+        st.setdefault("cleanup_ids", []).append(msg.message_id)
         return
+
     if cq.data == "minhas_minutas":
-        if not st.get("qlid"):
-            await cq.message.edit_text(
-                "Cadastre um QLID primeiro.", reply_markup=kb_cadastro()
-            )
-            return
         files = storage.list_minutas(st["qlid"])
         if not files:
-            await cq.message.edit_text("Você ainda não tem minutas geradas.")
+            await cq.message.edit_text(
+                "📂 Você ainda não tem minutas geradas.\n\nEnvie suas DANFEs em PDF para começar ou digite /opcoes para acessar outras funções."
+            )
             return
-        with open(files[0], "rb") as f:
-            await cq.message.reply_document(f, filename=os.path.basename(files[0]))
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"📄 {os.path.basename(f)}", callback_data=f"minuta_{i}"
+                )
+            ]
+            for i, f in enumerate(files[:5])
+        ]
+        await cq.message.edit_text(
+            "Selecione uma minuta:", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if cq.data.startswith("minuta_"):
+        idx = int(cq.data.split("_")[1])
+        files = storage.list_minutas(st["qlid"])
+        if idx < len(files):
+            with open(files[idx], "rb") as f:
+                await cq.message.reply_document(
+                    f, filename=os.path.basename(files[idx])
+                )
         return
 
 
@@ -436,7 +566,11 @@ async def processar_lote(cq, context, st, volumes: int):
         return
 
     pdfs_dir = f"{storage.user_dir(qlid)}/temp/{sid}/pdfs"
-    pdfs = [os.path.join(pdfs_dir, f) for f in os.listdir(pdfs_dir) if f.lower().endswith(".pdf")]
+    pdfs = [
+        os.path.join(pdfs_dir, f)
+        for f in os.listdir(pdfs_dir)
+        if f.lower().endswith(".pdf")
+    ]
     if not pdfs:
         await cq.message.edit_text("Nenhuma DANFE no lote atual.")
         return
@@ -449,7 +583,9 @@ async def processar_lote(cq, context, st, volumes: int):
         header, produtos = danfe_parser.parse_lote(pdfs)
 
         # Mensagem de busca do RAT
-        msg_rat = await cq.message.reply_text("Fazendo a busca do RAT… isso pode levar alguns minutos.")
+        msg_rat = await cq.message.reply_text(
+            "Fazendo a busca do RAT… isso pode levar alguns minutos."
+        )
         st["cleanup_ids"].append(msg_rat.message_id)
 
         for p in produtos:
@@ -474,7 +610,13 @@ async def processar_lote(cq, context, st, volumes: int):
 
         await asyncio.to_thread(
             preencher_e_exportar_lote,
-            qlid, st["cidade"], header, produtos, st["data"], volumes, out_pdf
+            qlid,
+            st["cidade"],
+            header,
+            produtos,
+            st["data"],
+            volumes,
+            out_pdf,
         )
 
         # Limpa mensagens anteriores
@@ -490,9 +632,17 @@ async def processar_lote(cq, context, st, volumes: int):
 
         # Envia a minuta final
         with open(out_pdf, "rb") as f:
-            await cq.message.reply_document(InputFile(f, filename=os.path.basename(out_pdf)), caption="✅ Sua minuta está pronta. Caso precise, envie mais DANFEs para gerar outra.")
+            # await cq.message.reply_document(InputFile(f, filename=os.path.basename(out_pdf)), caption="✅ Sua minuta está pronta. Caso precise, envie mais DANFEs para gerar outra.")
+            await cq.message.reply_document(
+                InputFile(f, filename=os.path.basename(out_pdf)),
+                caption="✅ Sua minuta está pronta.\n\nEnvie mais DANFEs para gerar outra ou digite /opcoes para acessar outras funções.",
+            )
+            #     "✅ Sua minuta está pronta.\n\nEnvie mais DANFEs para gerar outra ou digite /opcoes para acessar outras funções."
+            # )
     except Exception as e:
-        await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}")
+        await cq.message.reply_text(
+            f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}"
+        )
         traceback.print_exc()
     finally:
         storage.finalize_session(qlid, sid)
@@ -505,17 +655,29 @@ async def processar_lote(cq, context, st, volumes: int):
         st.pop("cleanup_ids", None)
         st.pop("last_danfe_count", None)
 
+
+async def set_bot_commands(app):
+    await app.bot.set_my_commands([
+        BotCommand("start", "Iniciar o bot"),
+        BotCommand("opcoes", "Mostrar opções"),
+        BotCommand("minutas", "Listar minutas anteriores"),
+        BotCommand("alterar", "Alterar cidade"),
+        BotCommand("cancelar", "Fechar menus ou teclados")
+    ])
+
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(set_bot_commands).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(CommandHandler("opcoes", opcoes))
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.PDF, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.run_polling()
 
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
