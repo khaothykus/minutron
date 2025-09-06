@@ -1,6 +1,5 @@
 import os, asyncio, traceback
 from datetime import datetime
-
 from telegram.error import BadRequest
 from telegram import (
     Update,
@@ -39,90 +38,20 @@ async def orientar_envio_pdf(context, chat_id):
         chat_id=chat_id,
         text=(
             "⚠️ Este tipo de arquivo não é aceito.\n\n"
-            "Para enviar corretamente:\n\n"
+            "Para enviar corretamente:\n"
             "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
-            "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
+            "2️⃣ Escolha *Documento* (não Foto nem Galeria).\n"
             "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
             "4️⃣ Envie.\n\n"
-            "💡 Dica: Pode enviar vários PDFs de uma vez!"
+            "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
         ),
         parse_mode="Markdown"
     )
 
-# async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     u = update.effective_user
-#     st = SESS.setdefault(u.id, {})
-#     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
-#     qlid, rec = storage.users_find_by_tg(u.id)
-#     msg_id = st.get("msg_recebimento_id")
-
-#     if rec:
-#         SESS[u.id] = {
-#             "qlid": qlid,
-#             "cidade": rec.get("cidade", ""),
-#             "blocked": rec.get("blocked", False),
-#             "sid": "",
-#             "volbuf": "",
-#             "data": "",
-#             "msg_recebimento_id": msg_id,
-#         }
-#         await context.bot.send_message(
-#             chat_id=update.effective_chat.id,
-#             text=f"👋 Bem-vindo, {u.first_name}!\n\nEnvie suas DANFEs em PDF para começar.",
-#             reply_markup=None
-#         )
-#     else:
-#         SESS[u.id] = {
-#             "qlid": "",
-#             "cidade": "",
-#             "blocked": False,
-#             "sid": "",
-#             "volbuf": "",
-#             "data": "",
-#             "msg_recebimento_id": None,
-#         }
-#         await update.message.reply_text(
-#             f"Olá, {u.first_name}! Vamos configurar seu acesso.",
-#             reply_markup=kb_cadastro(),
-#         )
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     st = SESS.setdefault(u.id, {})
-
-    # 1) Apaga tudo que foi registrado antes
     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
-
-    # 2) Apaga também mensagem de progresso, se existir (fora do cleanup_ids)
-    if st.get("progress_msg_id"):
-        try:
-            await context.bot.delete_message(
-                chat_id=update.effective_chat.id,
-                message_id=st["progress_msg_id"]
-            )
-        except:
-            pass
-
-    # 3) Cancela batch pendente (se você tentou debounce em algum momento)
-    batch_task = st.get("batch_task")
-    if batch_task and not getattr(batch_task, "done", lambda: True)():
-        try:
-            batch_task.cancel()
-        except:
-            pass
-
-    # 4) Limpa todo estado transitório
-    for k in (
-        "progress_msg_id", "progress_sid", "progress_text",
-        "last_danfe_count", "warned_incomplete",
-        "batch_docs", "batch_task",
-        "sid", "volbuf", "data",
-        "cleanup_ids",
-    ):
-        st.pop(k, None)
-    st["cleanup_ids"] = []
-
-    # 5) Continua com a sua lógica original
     qlid, rec = storage.users_find_by_tg(u.id)
     msg_id = st.get("msg_recebimento_id")
 
@@ -135,14 +64,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "volbuf": "",
             "data": "",
             "msg_recebimento_id": msg_id,
-            "cleanup_ids": [],
         }
-        msg = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"👋 Bem-vindo, {u.first_name}!\n\nEnvie suas DANFEs em PDF para começar.",
             reply_markup=None
         )
-        SESS[u.id]["cleanup_ids"].append(msg.message_id)
     else:
         SESS[u.id] = {
             "qlid": "",
@@ -152,14 +79,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "volbuf": "",
             "data": "",
             "msg_recebimento_id": None,
-            "cleanup_ids": [],
         }
-        msg = await update.message.reply_text(
+        await update.message.reply_text(
             f"Olá, {u.first_name}! Vamos configurar seu acesso.",
             reply_markup=kb_cadastro(),
         )
-        SESS[u.id]["cleanup_ids"].append(msg.message_id)
-
 
 async def cmd_minutas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -192,26 +116,26 @@ async def cmd_alterar_cidade(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["awaiting_cidade"] = True
     st.setdefault("cleanup_ids", []).append(msg.message_id)
 
-# async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     uid = update.effective_user.id
-#     st = SESS.setdefault(uid, {})
+async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    st = SESS.setdefault(uid, {})
 
-#     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
+    await limpar_mensagens_antigas(st, context, update.effective_chat.id)
 
-#     if st.get("progress_msg_id"):
-#         try:
-#             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=st["progress_msg_id"])
-#         except:
-#             pass
-#         st.pop("progress_msg_id", None)
-#         st.pop("progress_sid", None)
-#         st.pop("progress_text", None)
+    if st.get("progress_msg_id"):
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=st["progress_msg_id"])
+        except:
+            pass
+        st.pop("progress_msg_id", None)
+        st.pop("progress_sid", None)
+        st.pop("progress_text", None)
 
-#     context.user_data.clear()
-#     st.update({"awaiting_cidade": False, "sid": "", "volbuf": "", "data": ""})
+    context.user_data.clear()
+    st.update({"awaiting_cidade": False, "sid": "", "volbuf": "", "data": ""})
 
-#     msg = await update.message.reply_text("✅ Operação cancelada. Você pode continuar enviando DANFEs ou usar /minutas.")
-#     st.setdefault("cleanup_ids", []).append(msg.message_id)
+    msg = await update.message.reply_text("✅ Operação cancelada. Você pode continuar enviando DANFEs ou usar /minutas.")
+    st.setdefault("cleanup_ids", []).append(msg.message_id)
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
@@ -275,7 +199,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         st["cidade"] = c.title()
         if st.get("qlid"):
             storage.users_upsert(st["qlid"], {"telegram_id": uid, "cidade": st["cidade"], "blocked": False})
-            await msg.reply_text(f"🏙️ Cidade definida: {st['cidade']}.\nAgora é só enviar as DANFEs (PDFs) para gerar a minuta!")
+        await msg.reply_text(f"🏙️ Cidade definida: {st['cidade']}.\n\nAgora é só enviar as DANFEs (PDFs) para gerar a minuta!")
         context.user_data["awaiting_cidade"] = False
         return
 
@@ -345,109 +269,6 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.delete()
 
-# BATCH_DELAY = 1.5  # segundos de espera após o último arquivo
-# async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     msg = update.message
-#     u = msg.from_user
-#     st = SESS.setdefault(u.id, {
-#         "qlid": "", "cidade": "", "blocked": False,
-#         "sid": "", "volbuf": "", "data": ""
-#     })
-#     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
-
-#     if st["blocked"]:
-#         await msg.delete()
-#         return
-
-#     if not st["qlid"] or not st["cidade"]:
-#         if not st.get("warned_incomplete"):
-#             await context.bot.send_message(
-#                 chat_id=msg.chat.id,
-#                 text="⚠️ Finalize o cadastro primeiro.",
-#                 reply_markup=kb_cadastro()
-#             )
-#             st["warned_incomplete"] = True
-#         await msg.delete()
-#         return
-
-#     doc = msg.document
-#     if not doc.file_name.lower().endswith(".pdf"):
-#         await orientar_envio_pdf(context, msg.chat.id)
-#         await msg.delete()
-#         return
-
-#     if not st["sid"]:
-#         st["sid"] = storage.new_session(st["qlid"])
-
-#     # Adiciona o documento ao buffer
-#     st.setdefault("batch_docs", []).append((doc, msg))
-
-#     # Cancela tarefa anterior se existir
-#     if "batch_task" in st and not st["batch_task"].done():
-#         st["batch_task"].cancel()
-
-#     async def process_batch():
-#         pdf_dir = None
-
-#         async def download_and_save(d, m):
-#             nonlocal pdf_dir
-#             dest = storage.save_pdf(st["qlid"], st["sid"], d.file_name)
-#             file = await d.get_file()  # sem timeout aqui
-#             await file.download_to_drive(dest)
-#             if not danfe_parser.is_danfe(dest):
-#                 await context.bot.send_message(
-#                     chat_id=m.chat.id,
-#                     text=f"❌ Arquivo {d.file_name} não é uma DANFE válida. Tente outro PDF."
-#                 )
-#                 os.remove(dest)
-#             try:
-#                 await m.delete()
-#             except BadRequest as e:
-#                 if "message to delete not found" not in str(e).lower():
-#                     raise
-#             pdf_dir = os.path.dirname(dest)
-
-#         # Baixa todos os PDFs em paralelo
-#         await asyncio.gather(*(download_and_save(d, m) for d, m in st["batch_docs"]))
-
-#         if not pdf_dir:
-#             return
-
-#         count = len([f for f in os.listdir(pdf_dir) if f.lower().endswith(".pdf")])
-#         st["last_danfe_count"] = count
-
-#         text = f"📄 Recebidas {count} DANFE{'s' if count > 1 else ''}.\n\nEnvie mais DANFEs ou toque abaixo para gerar a minuta."
-#         reply_markup = kb_main()
-
-#         msg_id = st.get("progress_msg_id")
-#         sid_ref = st.get("progress_sid")
-#         sid_now = st["sid"]
-
-#         try:
-#             if msg_id and sid_ref == sid_now and st.get("progress_text") != text:
-#                 await context.bot.edit_message_text(
-#                     chat_id=msg.chat.id,
-#                     message_id=msg_id,
-#                     text=text,
-#                     reply_markup=reply_markup
-#                 )
-#                 st["progress_text"] = text
-#             else:
-#                 raise Exception("Mensagem não modificada ou inválida")
-#         except:
-#             new_msg = await context.bot.send_message(
-#                 chat_id=msg.chat.id,
-#                 text=text,
-#                 reply_markup=reply_markup
-#             )
-#             st["progress_msg_id"] = new_msg.message_id
-#             st["progress_sid"] = sid_now
-
-#         st["batch_docs"] = []
-
-#     st["batch_task"] = asyncio.create_task(asyncio.sleep(BATCH_DELAY))
-#     st["batch_task"].add_done_callback(lambda _: asyncio.create_task(process_batch()))
-
 # ===== BLOQUEIO DE MÍDIA NÃO-PDF =====
 async def bloquear_anexo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -462,72 +283,158 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cq.answer()
     uid = cq.from_user.id
     st = SESS.get(uid)
-    await limpar_mensagens_antigas(st, context, cq.message.chat.id)
 
     if not st:
-        await cq.message.edit_text("⚠️ Sessão expirada. Envie um PDF para reiniciar.")
+        # Se a mensagem não existir mais, manda nova
+        try:
+            await cq.message.edit_text("⚠️ Sessão expirada. Envie um PDF para reiniciar.")
+        except BadRequest:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Sessão expirada. Envie um PDF para reiniciar.")
         return
 
+    # ----- Cadastro QLID -----
     if cq.data == "cad_qlid":
-        await cq.message.edit_text("🆔 Vamos cadastrar seu QLID!\n\nDigite no formato AA999999 e envie como mensagem.")
+        try:
+            await cq.message.edit_text("🆔 Vamos cadastrar seu QLID!\n\nDigite no formato AA999999 e envie como mensagem.")
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="🆔 Vamos cadastrar seu QLID!\n\nDigite no formato AA999999 e envie como mensagem."
+            )
         context.user_data["awaiting_qlid"] = True
         return
 
+    # ----- Cadastro Cidade -----
     if cq.data == "cad_cidade":
-        await cq.message.edit_text("🏙️ Envie sua Cidade (apenas letras e espaços).")
+        try:
+            await cq.message.edit_text("🏙️ Envie sua Cidade (apenas letras e espaços).")
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="🏙️ Envie sua Cidade (apenas letras e espaços)."
+            )
         context.user_data["awaiting_cidade"] = True
         return
 
+    # ----- Alterar Cidade -----
     if cq.data == "alterar_cidade":
         await cmd_alterar_cidade(update, context)
         return
 
+    # ----- Minhas Minutas (listar) -----
     if cq.data == "minhas_minutas":
         files = storage.list_minutas(st["qlid"])
         if not files:
-            await cq.message.edit_text("📂 Você ainda não tem minutas geradas.\n\nEnvie suas DANFEs em PDF para começar.")
+            try:
+                await cq.message.edit_text("📂 Você ainda não tem minutas geradas.\n\nEnvie suas DANFEs em PDF para começar.")
+            except BadRequest:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="📂 Você ainda não tem minutas geradas.\n\nEnvie suas DANFEs em PDF para começar."
+                )
             return
-        buttons = [[InlineKeyboardButton(f"📄 {os.path.basename(f)}", callback_data=f"minuta_{i}")] for i, f in enumerate(files[:5])]
-        await cq.message.edit_text("Selecione uma minuta:", reply_markup=InlineKeyboardMarkup(buttons))
+
+        buttons = [[InlineKeyboardButton(f"📄 {os.path.basename(f)}", callback_data=f"minuta_{i}")]
+                   for i, f in enumerate(files[:5])]
+        try:
+            await cq.message.edit_text("Selecione uma minuta:", reply_markup=InlineKeyboardMarkup(buttons))
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Selecione uma minuta:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
         return
 
+    # ----- Clique numa minuta específica -----
     if cq.data.startswith("minuta_"):
         idx = int(cq.data.split("_")[1])
         files = storage.list_minutas(st["qlid"])
         if idx < len(files):
-            await cq.message.delete()
-            with open(files[idx], "rb") as f:
-                await cq.message.reply_document(f, filename=os.path.basename(files[idx]))
+            # Tenta apagar a mensagem da lista, mas ignora se não existir
+            try:
+                await cq.message.delete()
+            except BadRequest as e:
+                if "message to delete not found" not in str(e).lower():
+                    # Se for outro erro, relança
+                    raise
+
+            # Envia o PDF
+            try:
+                with open(files[idx], "rb") as f:
+                    await cq.message.reply_document(f, filename=os.path.basename(files[idx]))
+            except FileNotFoundError:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"❌ Não encontrei a minuta: {os.path.basename(files[idx])}"
+                )
+            except Exception as e:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"⚠️ Erro ao enviar a minuta: {e}"
+                )
         return
 
+    # ----- Gerar Minuta (pedir data) -----
     if cq.data == "gerar_minuta":
         if not st.get("sid"):
-            await cq.message.edit_text("⚠️ Você ainda não enviou nenhuma DANFE. Envie seus PDFs primeiro.")
+            try:
+                await cq.message.edit_text("⚠️ Você ainda não enviou nenhuma DANFE. Envie seus PDFs primeiro.")
+            except BadRequest:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Você ainda não enviou nenhuma DANFE. Envie seus PDFs primeiro."
+                )
             return
+
         pdfs_dir = f"{storage.user_dir(st['qlid'])}/temp/{st['sid']}/pdfs"
         pdfs = [f for f in os.listdir(pdfs_dir) if f.lower().endswith(".pdf")] if os.path.exists(pdfs_dir) else []
         if not pdfs:
-            await cq.message.edit_text("⚠️ Nenhuma DANFE encontrada no lote atual. Envie os arquivos antes de gerar a minuta.")
+            try:
+                await cq.message.edit_text("⚠️ Nenhuma DANFE encontrada no lote atual. Envie os arquivos antes de gerar a minuta.")
+            except BadRequest:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Nenhuma DANFE encontrada no lote atual. Envie os arquivos antes de gerar a minuta."
+                )
             return
-        await cq.message.edit_text("🗓️ Escolha a data:", reply_markup=kb_datas())
+
+        try:
+            await cq.message.edit_text("🗓️ Escolha a data:", reply_markup=kb_datas())
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="🗓️ Escolha a data:",
+                reply_markup=kb_datas()
+            )
         return
 
+    # ----- Data escolhida -----
     if cq.data.startswith("data_"):
         raw_data = cq.data[5:]
         try:
             data_formatada = datetime.strptime(raw_data, "%Y-%m-%d").strftime("%d/%m/%Y")
         except:
-            data_formatada = raw_data
+            data_formatada = raw_data  # fallback
+
         st["data"] = raw_data
         st["volbuf"] = ""
-        await cq.message.edit_text(
-            f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
-            reply_markup=kb_volumes()
-        )
+        try:
+            await cq.message.edit_text(
+                f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
+                reply_markup=kb_volumes()
+            )
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
+                reply_markup=kb_volumes()
+            )
         return
 
+    # ----- Teclado de volumes -----
     if cq.data.startswith("vol_"):
-        # Formata a data salva para BR
+        # Formata a data salva para exibir
         try:
             data_formatada = datetime.strptime(st["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
         except:
@@ -538,10 +445,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif cq.data == "vol_ok":
             vol = st.get("volbuf", "0")
             if not vol or vol == "0":
-                await cq.message.edit_text(
-                    f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
-                    reply_markup=kb_volumes(st["volbuf"])
-                )
+                try:
+                    await cq.message.edit_text(
+                        f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
+                        reply_markup=kb_volumes(st["volbuf"])
+                    )
+                except BadRequest:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
+                        reply_markup=kb_volumes(st["volbuf"])
+                    )
                 return
             await cq.message.edit_reply_markup(reply_markup=None)
             await processar_lote(cq, context, st, int(vol))
@@ -549,10 +463,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             st["volbuf"] = (st.get("volbuf", "") + cq.data.split("_")[1])[:4]
 
-        await cq.message.edit_text(
-            f"📅 Data escolhida: {data_formatada}\nVolumes: {st['volbuf'] or '-'}",
-            reply_markup=kb_volumes(st["volbuf"])
-        )
+        try:
+            await cq.message.edit_text(
+                f"📅 Data escolhida: {data_formatada}\nVolumes: {st['volbuf'] or '-'}",
+                reply_markup=kb_volumes(st["volbuf"])
+            )
+        except BadRequest:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"📅 Data escolhida: {data_formatada}\nVolumes: {st['volbuf'] or '-'}",
+                reply_markup=kb_volumes(st["volbuf"])
+            )
         return
 
 # ===== PROCESSAR LOTE =====
@@ -594,12 +515,10 @@ async def processar_lote(cq, context, st, volumes: int):
                     rat = "DOA"
                 elif p["status"] == "RUIM":
                     rat = ""
-                # else:
-                #     rat = "-"
+                else:
+                    rat = "-"
 
             p["rat"] = rat
-
-
 
         out_pdf = storage.output_pdf_path(qlid)
         await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
@@ -627,15 +546,13 @@ async def processar_lote(cq, context, st, volumes: int):
 
 # ===== MAIN =====
 def main():
-    # app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app = ApplicationBuilder().token(BOT_TOKEN).read_timeout(60).connect_timeout(60).build()
-
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("minutas", cmd_minutas))
     app.add_handler(CommandHandler("alterar", cmd_alterar_cidade))
-    #app.add_handler(CommandHandler("cancelar", cmd_cancelar))
+    app.add_handler(CommandHandler("cancelar", cmd_cancelar))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
@@ -653,7 +570,6 @@ def main():
     app.add_handler(MessageHandler(filters.AUDIO, bloquear_anexo))
     app.add_handler(MessageHandler(filters.VOICE, bloquear_anexo))
     app.add_handler(MessageHandler(filters.ANIMATION, bloquear_anexo))
-    # Removido filters.STICKER para evitar erro de versão
 
     app.run_polling()
 

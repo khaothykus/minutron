@@ -1,5 +1,3 @@
-# services/transportadora_parser.py
-
 from collections import Counter
 
 def analisar_transportadoras(documentos: list[dict]) -> dict:
