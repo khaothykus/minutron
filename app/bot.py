@@ -40,7 +40,7 @@ async def orientar_envio_pdf(context, chat_id):
             "⚠️ Este tipo de arquivo não é aceito.\n\n"
             "Para enviar corretamente:\n"
             "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
-            "2️⃣ Escolha *Documento* (não Foto nem Galeria).\n"
+            "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
             "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
             "4️⃣ Envie.\n\n"
             "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
