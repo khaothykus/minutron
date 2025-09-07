@@ -1,4 +1,4 @@
-# 🤖 Bot Copilot – Geração automatizada de minutas via DANFE
+# 🤖 Minutron – Geração automatizada de minutas via DANFE
 
 Este projeto automatiza o preenchimento de minutas a partir de arquivos PDF de DANFE, gerando documentos formatados em Excel e exportando para PDF com dados organizados, valores formatados e múltiplas páginas.
 
