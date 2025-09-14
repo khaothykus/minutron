@@ -1,0 +1,24 @@
+# Normaliza fim de linha para LF em texto
+*               text=auto eol=lf
+
+# Texto sempre LF
+*.py            text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.sh            text eol=lf
+
+# Binários (sem diff)
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.pdf           binary
+*.xlsx          binary
+*.ods           binary
+
+# Pastas de runtime/ativos privados: sem diff e “vendored” pro GitHub linguist
+data/**                 -diff linguist-vendored
+app/templates/**        -diff linguist-vendored
+app/templates/.keep     text eol=lf

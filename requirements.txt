@@ -1,0 +1,32 @@
+# Core do bot
+python-telegram-bot[job-queue]==21.7
+
+# PDF parsing e geração
+pdfminer.six==20250506
+pdfplumber==0.11.7
+pypdf==6.0.0
+pypdfium2==4.30.0
+Pillow==11.3.0
+reportlab
+
+# Excel/LibreOffice UNO (usamos 'uno' da distro; não é via pip)
+# (nenhuma lib pip aqui – apenas garantir python3-uno via apt)
+
+# Selenium (Firefox headless)
+selenium==4.35.0
+websocket-client==1.8.0
+trio==0.30.0
+trio-websocket==0.12.2
+typing_extensions==4.14.1
+urllib3==2.5.0
+certifi==2025.8.3
+
+# Opcional (sd_notify). O bot tolera ausência, mas deixo disponível:
+sdnotify==0.3.2
+pypdf
+pdfplumber
+pdfminer.six
+pillow
+selenium
+python-telegram-bot[job-queue]
+sdnotify

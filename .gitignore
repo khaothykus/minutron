@@ -1,0 +1,81 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.orig
+.vscode/
+.idea/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+.envrc
+
+# =========================
+# Secrets / Env
+# =========================
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# =========================
+# Logs / Artifacts
+# =========================
+*.log
+logs/
+*.tmp
+tmp/
+*.bak
+
+# =========================
+# Projeto: dados em runtime
+# =========================
+data/**
+!data/.keep
+
+# =========================
+# Projeto: templates privados
+# (mantém o diretório com .keep)
+# =========================
+app/templates/*.png
+app/templates/*.jpg
+app/templates/*.jpeg
+app/templates/*.xlsx
+app/templates/*.ods
+!app/templates/.keep
+
+# =========================
+# LibreOffice/UNO temporários
+# =========================
+~$*.ods
+~$*.xlsx
+.~lock.*
+
+# =========================
+# Selenium screenshots/html (se não estiverem em data/)
+# =========================
+rat_artifacts/**

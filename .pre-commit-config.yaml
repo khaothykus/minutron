@@ -1,0 +1,36 @@
+repos:
+  # Hooks nativos e leves
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]  # bloqueia arquivos > ~5MB
+      - id: detect-private-key
+
+  # Linter + formatador rápidos (um único pacote)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ["--fix"]   # corrige automaticamente onde possível
+      - id: ruff-format   # formata (substitui black)
+
+  # Regras locais para bloquear segredos comuns
+  - repo: local
+    hooks:
+      - id: block-env-files
+        name: Block committing .env files
+        language: system
+        entry: bash -c 'if git diff --cached --name-only | grep -E "^(\\.env(\\..*)?$)"; then echo "❌ Commit bloqueado: não versione .env*"; exit 1; fi'
+        pass_filenames: false
+
+      - id: block-secrets
+        name: Block committing PEM/keys
+        language: system
+        entry: bash -c 'if git diff --cached --name-only | grep -E "\\.(pem|key|crt)$"; then echo "❌ Commit bloqueado: chaves/certs detectados"; exit 1; fi'
+        pass_filenames: false
