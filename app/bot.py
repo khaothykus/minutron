@@ -23,25 +23,14 @@ from telegram.ext import (
     filters,
 )
 
-from config import (
-    BOT_TOKEN,
-    ADMIN_TELEGRAM_ID,
-    # CODIGO_SAP,
-    # MODO_IMPRESSAO,
-    # NOME_IMPRESSORA,
-)
+from config import BOT_TOKEN, ADMIN_TELEGRAM_ID
 from services import storage, danfe_parser
 # from services.excel_filler_spire import preencher_e_exportar_lote
 from services.excel_filler_uno import preencher_e_exportar_lote
 from services.rat_search import get_rat_for_ocorrencia
 from services.validators import valida_qlid, valida_cidade
 from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes
-
-# from etiqueta import (
-#     gerar_comando_epl2,
-#     enviar_comando_epl2,
-#     # enviar_comando_usb,
-# )
+from services import etiqueta   # impressão de etiquetas
 
 # =========================================
 # LOGGING BÁSICO (vai pro journal)
@@ -127,6 +116,9 @@ async def _post_shutdown(app):
 SESS = {}
 RAT_TIMEOUT = int(os.getenv("RAT_FLOW_TIMEOUT", "90"))
 _rat_cache = {}
+
+# fila de impressão de etiquetas (apenas admin)
+LABEL_QUEUE: dict[int, list[dict]] = {}  # { user_id: [ {codigo_tecnico, ocorrencia, codigo_produto, status, quantidade}, ... ] }
 
 async def limpar_mensagens_antigas(st, context, chat_id):
     for mid in st.get("cleanup_ids", []):
@@ -218,15 +210,6 @@ async def cmd_alterar_cidade(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = await update.message.reply_text("🏙️ Envie a nova cidade.")
     context.user_data["awaiting_cidade"] = True
     st.setdefault("cleanup_ids", []).append(msg.message_id)
-
-# =========================================
-# HEALTH ENDPOINT (/health)
-# =========================================
-async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text(f"ok {datetime.now().isoformat(timespec='seconds')}")
-    except Exception:
-        pass
 
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -390,6 +373,48 @@ async def bloquear_anexo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await orientar_envio_pdf(context, msg.chat.id)
 
 # ===== CALLBACKS =====
+# --- Callbacks de impressão de etiquetas (apenas admin) ---
+async def on_print_labels(update, context):
+    cq = update.callback_query
+    await cq.answer()
+    uid = cq.from_user.id
+    itens = LABEL_QUEUE.pop(uid, None)
+    if not itens:
+        return await cq.message.reply_text("⚠️ Não encontrei itens para impressão deste lote.")
+
+    try:
+        # usa print_batch se existir; senão, cai no fallback interno
+        total = getattr(etiqueta, "print_batch", None)
+        if callable(total):
+            total = etiqueta.print_batch(itens)
+        else:
+            # fallback: imprime um a um respeitando quantidade
+            total = 0
+            copias_mult = max(1, int(os.getenv("LABEL_COPIES_PER_QTY", "1")))
+            for it in itens:
+                copias = max(1, int(it.get("quantidade", 1))) * copias_mult
+                for _ in range(copias):
+                    etiqueta.imprimir_etiqueta(
+                        codigo_tecnico=it["codigo_tecnico"],
+                        ocorrencia=it["ocorrencia"],
+                        codigo_produto=it["codigo_produto"],
+                        status=it.get("status", ""),
+                        copias=1,
+                    )
+                    total += 1
+
+        msg = f"✅ Enviado para impressão: {total} etiqueta(s)." if total > 0 else "⚠️ Nenhuma etiqueta foi impressa."
+        await cq.message.reply_text(msg)
+
+    except Exception as e:
+        await cq.message.reply_text(f"❌ Erro ao imprimir: {e}")
+
+async def on_skip_labels(update, context):
+    cq = update.callback_query
+    await cq.answer()
+    LABEL_QUEUE.pop(cq.from_user.id, None)
+    await cq.message.reply_text("Ok, não vou imprimir etiquetas.")
+    
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
     await cq.answer()
@@ -588,34 +613,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # # Impressão de etiquetas
-    # if cq.data == "imprimir_etiquetas":
-    #     produtos = context.user_data.get("etiqueta_produtos", [])
-    #     ocorrencia = context.user_data.get("etiqueta_ocorrencia", "-")
-    #     for p in produtos:
-    #         for _ in range(int(p.get("quantidade", 1))):
-    #             cmd = gerar_comando_epl2(
-    #                 ocorrencia=ocorrencia,
-    #                 produto=p["codigo_prod"],
-    #                 status=p["rat"]  # já convertido para GOOD/BAD/DOA
-    #             )
-    #             # enviar_comando_epl2(cmd)
-    #             if MODO_IMPRESSAO == "USB":
-    #                 #enviar_comando_usb(cmd, NOME_IMPRESSORA)
-    #                 pass
-    #             else:
-    #                 enviar_comando_epl2(cmd)
-    #     await cq.message.reply_text("✅ Etiquetas enviadas para impressão.")
-
-    # elif cq.data == "nao_imprimir_etiquetas":
-    #     await cq.message.reply_text("Ok, etiquetas não foram impressas.")
-
 
 # ===== PROCESSAR LOTE =====
 async def processar_lote(cq, context, st, volumes: int):
+    import traceback, os
+    uid = cq.from_user.id
+
+    # Garante que 'st' é um dict de sessão
+    if not isinstance(st, dict):
+        st = SESS.setdefault(uid, {})
+
     chat_id = cq.message.chat.id
-    qlid = st["qlid"]
+    qlid = st.get("qlid")
     sid = st.get("sid")
+
     if not sid:
         await cq.message.edit_text("Nenhuma DANFE no lote atual.")
         return
@@ -637,7 +648,6 @@ async def processar_lote(cq, context, st, volumes: int):
                 p["ocorrencia"] = "-"
 
             rat = None
-
             key = (p["ocorrencia"], p["codigo_prod"])
             rat = _rat_cache.get(key)
 
@@ -645,20 +655,21 @@ async def processar_lote(cq, context, st, volumes: int):
                 try:
                     rat = await asyncio.wait_for(
                         asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p["codigo_prod"]),
-                        timeout=RAT_TIMEOUT + 10  # um respiro acima do flow interno
+                        timeout=RAT_TIMEOUT + 10
                     )
                 except asyncio.TimeoutError:
-                    rat = None  # deixa cair nos fallbacks abaixo
+                    rat = None
                 except Exception:
                     rat = None
 
-            # fallbacks (como já tinha):
+            # Fallbacks
             if not rat:
-                if p["status"] == "BOM":
+                s = (p.get("status") or "").upper()
+                if s == "BOM":
                     rat = "GOOD"
-                elif p["status"] == "DOA":
+                elif s == "DOA":
                     rat = "DOA"
-                elif p["status"] == "RUIM":
+                elif s == "RUIM":
                     rat = ""
                 else:
                     rat = "-"
@@ -668,36 +679,70 @@ async def processar_lote(cq, context, st, volumes: int):
 
         out_pdf = storage.output_pdf_path(qlid)
         await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
-        await asyncio.to_thread(preencher_e_exportar_lote, qlid, st["cidade"], header, produtos, st["data"], volumes, out_pdf)
+        await asyncio.to_thread(preencher_e_exportar_lote, qlid, st.get("cidade"), header, produtos, st.get("data"), volumes, out_pdf)
 
         with open(out_pdf, "rb") as f:
             await cq.message.reply_document(
                 InputFile(f, filename=os.path.basename(out_pdf)),
                 caption="✅ Sua minuta está pronta.\n\n📩 Envie mais DANFEs para gerar outra minuta."
             )
-        # # ===== Impressão de etiquetas (somente para ADMIN) =====
-        # if cq.from_user.id == ADMIN_TELEGRAM_ID:
-        #     await cq.message.reply_text("🖨️ Deseja imprimir as etiquetas?", reply_markup=InlineKeyboardMarkup([
-        #         [InlineKeyboardButton("Sim", callback_data="imprimir_etiquetas")],
-        #         [InlineKeyboardButton("Não", callback_data="nao_imprimir_etiquetas")]
-        #     ]))
-        #     context.user_data["etiqueta_produtos"] = produtos
-        #     context.user_data["etiqueta_ocorrencia"] = header.get("ocorrencia", "-")
+
+        # --- Pergunta de etiquetas (apenas admin + habilitado) ---
+        try:
+            is_enabled = os.getenv("LABELS_ENABLED", "0") == "1"
+            is_admin   = str(cq.from_user.id) == str(os.getenv("ADMIN_TELEGRAM_ID", ""))
+            if is_enabled and is_admin:
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton  # garante import local
+                itens = []
+                cod_tec_fix = os.getenv("LABEL_CODIGO_TECNICO", "20373280")
+                for p in produtos:
+                    # status do DANFE (BOM/DOA/RUIM) -> good/doa/bad
+                    sraw = (p.get("status") or "").strip().upper()
+                    if sraw == "BOM":
+                        status_norm = "good"
+                    elif sraw == "DOA":
+                        status_norm = "doa"
+                    elif sraw == "RUIM":
+                        status_norm = "bad"
+                    else:
+                        status_norm = ""  # não marca
+
+                    itens.append({
+                        "codigo_tecnico": cod_tec_fix,
+                        "ocorrencia": p.get("ocorrencia") or "",
+                        "codigo_produto": p.get("codigo_prod") or "",
+                        "status": status_norm,
+                        "quantidade": int(float(p.get("qtde", 1) or 1)),
+                    })
+
+                LABEL_QUEUE[cq.from_user.id] = itens
+                await cq.message.reply_text(
+                    "🖨️ Deseja imprimir as etiquetas deste lote?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🖨️ Imprimir agora", callback_data="print_labels")],
+                        [InlineKeyboardButton("❌ Não imprimir",    callback_data="skip_labels")],
+                    ])
+                )
+        except Exception:
+            # nunca derruba o fluxo por causa de etiqueta
+            pass
 
     except Exception as e:
         await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}")
         traceback.print_exc()
     finally:
-        storage.finalize_session(qlid, sid)
-        st["sid"] = ""
-        st["volbuf"] = ""
-        st["data"] = ""
-        st.pop("progress_msg_id", None)
-        st.pop("progress_sid", None)
-        st.pop("progress_text", None)
-        st.pop("cleanup_ids", None)
-        st.pop("last_danfe_count", None)
-        st.pop("warned_incomplete", None)
+        # Limpeza segura
+        try:
+            if sid:
+                storage.finalize_session(qlid, sid)
+        except Exception:
+            pass
+
+        sess = SESS.setdefault(uid, {})
+        for k in ("sid", "volbuf", "data"):
+            sess[k] = ""
+        for k in ("progress_msg_id","progress_sid","progress_text","cleanup_ids","last_danfe_count","warned_incomplete"):
+            sess.pop(k, None)
 
 # ===== MAIN =====
 def main():
@@ -717,6 +762,11 @@ def main():
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CommandHandler("health", cmd_health))
+    
+    # Callbacks de impressão de etiquetas (apenas admin)
+    app.add_handler(CallbackQueryHandler(on_print_labels, pattern=r"^print_labels$"))
+    app.add_handler(CallbackQueryHandler(on_skip_labels,   pattern=r"^skip_labels$"))
+
 
     # Callbacks
     app.add_handler(CallbackQueryHandler(on_callback))
