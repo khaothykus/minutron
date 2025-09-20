@@ -36,7 +36,7 @@ LABEL_PRINTER = _env_str("LABEL_PRINTER", "")            # p/ usar lpr (-P)
 
 LABEL_WIDTH_MM  = _env_float("LABEL_WIDTH_MM", 90.0)
 LABEL_HEIGHT_MM = _env_float("LABEL_HEIGHT_MM", 70.0)
-LABEL_GAP_MM    = _env_float("LABEL_GAP_MM", 3.0)
+LABEL_GAP_MM    = _env_float("LABEL_GAP_MM", 2.0)
 LABEL_DPI       = _env_int("LABEL_DPI", 203)
 LABEL_FROM_BOTTOM = _env_bool("LABEL_FROM_BOTTOM", True)  # impressora puxa de baixo p/ cima
 
@@ -53,9 +53,10 @@ Y_STATUS = _env_float("Y_STATUS",  65.0) - Y_UP + 2.4
 
 # Centros dos parênteses dos status
 X_SHIFT = _env_float("X_SHIFT", -0.2)
-EXTRA_BAD_LEFT = _env_float("EXTRA_BAD_LEFT", 0.7)
+# EXTRA_BAD_LEFT = _env_float("EXTRA_BAD_LEFT", 0.7)
 X_GOOD = _env_float("X_STATUS_GOOD", 12.0) + X_SHIFT
-X_BAD  = _env_float("X_STATUS_BAD",  35.0) + X_SHIFT - EXTRA_BAD_LEFT
+# X_BAD  = _env_float("X_STATUS_BAD",  35.0) + X_SHIFT - EXTRA_BAD_LEFT
+X_BAD  = _env_float("X_STATUS_BAD",  34.0) + X_SHIFT
 X_DOA  = _env_float("X_STATUS_DOA",  57.0) + X_SHIFT
 
 # Texto/Fontes (TSPL fonte "4" ~8x16 dots). Mantive escala 1, como no seu teste
