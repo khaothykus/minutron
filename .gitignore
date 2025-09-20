@@ -37,7 +37,7 @@ ENV/
 # Secrets / Env
 # =========================
 .env
-.env.*
+#.env.*
 *.pem
 *.key
 *.crt
