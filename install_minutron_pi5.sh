@@ -15,11 +15,82 @@ sudo apt-get install -y \
   python3-venv python3-pip ${PYTHON_BIN} locales \
   libreoffice-core libreoffice-calc libreoffice-writer \
   python3-uno uno-libs-private \
-  firefox-esr ca-certificates fonts-dejavu fonts-liberation
+  firefox-esr ca-certificates fonts-dejavu fonts-liberation \
+  fonts-crosextra-carlito fonts-crosextra-caladea \
+  curl wget tar
 
 # Checagens silenciosas (sem DISPLAY)
 firefox-esr -headless --version >/dev/null 2>&1 || true
 libreoffice --headless --version >/dev/null 2>&1 || true
+
+# =========================
+# Instalação do geckodriver
+# =========================
+echo "==> Instalando geckodriver (apt ou fallback para release oficial)..."
+if sudo apt-get install -y geckodriver >/dev/null 2>&1; then
+  echo "-> geckodriver instalado via apt"
+else
+  echo "-> apt não trouxe geckodriver, tentando baixar release oficial..."
+
+  # Detecta arquitetura e escolhe asset name
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    aarch64|arm64) ASSET_ARCH="linux-aarch64" ;;
+    armv7l)        ASSET_ARCH="linux-arm7hf" ;;
+    x86_64|amd64)  ASSET_ARCH="linux64" ;;
+    *) 
+      echo "Arquitetura $ARCH não reconhecida automaticamente. Saindo."
+      exit 1
+      ;;
+  esac
+
+  # Busca última tag no GitHub releases e monta URL
+  LATEST_JSON="$(curl -sSfL "https://api.github.com/repos/mozilla/geckodriver/releases/latest")" || {
+    echo "Falha ao obter info do GitHub para geckodriver"; exit 1;
+  }
+  TAG="$(printf '%s\n' "$LATEST_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')"
+  if [ -z "$TAG" ]; then
+    echo "Não foi possível detectar tag mais recente do geckodriver"; exit 1;
+  fi
+
+  ASSET_NAME="geckodriver-${TAG#v}-${ASSET_ARCH}.tar.gz"
+  DOWNLOAD_URL="https://github.com/mozilla/geckodriver/releases/download/${TAG}/${ASSET_NAME}"
+
+  echo "-> Tag detectada: $TAG"
+  echo "-> Asset selecionado: $ASSET_NAME"
+  echo "-> Baixando: $DOWNLOAD_URL"
+
+  TMPDIR="$(mktemp -d)"
+  pushd "$TMPDIR" >/dev/null
+
+  if curl -fSLO "$DOWNLOAD_URL"; then
+    tar -xzf "$ASSET_NAME"
+    # extrai geckodriver e instala em /usr/local/bin
+    if [ -f geckodriver ]; then
+      sudo mv -f geckodriver /usr/local/bin/geckodriver
+      sudo chmod +x /usr/local/bin/geckodriver
+      echo "-> geckodriver instalado em /usr/local/bin/geckodriver"
+    else
+      echo "Arquivo geckodriver não encontrado após extrair o tarball"; popd >/dev/null; rm -rf "$TMPDIR"; exit 1
+    fi
+  else
+    echo "Falha no download do geckodriver: $DOWNLOAD_URL"
+    popd >/dev/null
+    rm -rf "$TMPDIR"
+    exit 1
+  fi
+
+  popd >/dev/null
+  rm -rf "$TMPDIR"
+fi
+
+# Verifica versão instalada
+if command -v geckodriver >/dev/null 2>&1; then
+  echo "-> geckodriver --version: $(geckodriver --version | head -n1)"
+else
+  echo "geckodriver não está disponível no PATH após a instalação"
+  exit 1
+fi
 
 echo "==> Preparando diretórios…"
 mkdir -p "${APP_DIR}/data" "${APP_DIR}/app/templates"
@@ -48,19 +119,19 @@ deactivate
 echo "==> Gerando .env se não existir…"
 if [ ! -f "${APP_DIR}/.env" ]; then
   cat > "${APP_DIR}/.env" <<'ENV'
+# TELEGRAM
 BOT_TOKEN=
 ADMIN_TELEGRAM_ID=
 
+# DIRS
 BASE_DATA_DIR=/home/pi/minutron/data
 TEMPLATE_PATH=/home/pi/minutron/app/templates/minuta_template.xlsx
 
-# Selenium/Firefox
+# SELENIUM / RAT Scraper
 FIREFOX_BINARY=/usr/bin/firefox-esr
 GECKODRIVER_PATH=/usr/local/bin/geckodriver
-MOZ_HEADLESS=1
-
-# RAT Scraper
 RAT_URL=https://servicos.ncratleos.com/consulta_ocorrencia/start.swe
+MOZ_HEADLESS=1
 RAT_HEADLESS=1
 RAT_PAGELOAD_TIMEOUT=35
 RAT_STEP_TIMEOUT=25
@@ -76,7 +147,14 @@ RAT_NETWORK_IDLE_S=2.5
 RAT_SAVE_ARTIFACTS=0
 RAT_ARTIFACTS_DIR=/home/pi/minutron/data/rat_artifacts
 
-# Página / impressão
+# LOGO overlay (opcional)
+LOGO_HEADER_PATH=/home/pi/minutron/app/templates/logo.png
+LOGO_ALIGN=
+LOGO_WIDTH_MM=35
+LOGO_TOP_MM=30
+LOGO_MARGIN_MM=30
+
+# PÁGINA (UNO)
 PAGE_FORMAT=A4
 PAGE_ORIENTATION=PORTRAIT
 MARGIN_TOP_MM=12
@@ -89,21 +167,63 @@ CENTER_V=0
 SCALE_TO_PAGES_X=1
 SCALE_TO_PAGES_Y=0
 
-# Logo overlay
-LOGO_HEADER_PATH=/home/pi/minutron/app/templates/logo.png
-LOGO_ALIGN=
-LOGO_WIDTH_MM=35
-LOGO_TOP_MM=30
-LOGO_MARGIN_MM=30
-
-# Locale/timezone
+# Locale/TZ
 LOG_LEVEL=INFO
 LC_ALL=pt_BR.UTF-8
 LANG=pt_BR.UTF-8
 TZ=America/Sao_Paulo
 
-# LibreOffice/UNO headless
-SAL_USE_VCLPLUGIN=headless
+# --- ETIQUETAS (Elgin L42 Pro) - PERFIL 95% ---
+LABELS_ENABLED=1
+LABEL_ADMIN_ONLY=1                  # só pergunta pro ADMIN_TELEGRAM_ID
+
+# Saída (USB direto; deixe LABEL_PRINTER vazio se não for usar CUPS)
+LABEL_DEVICE=/dev/usb/lp0
+LABEL_PRINTER=
+
+# Mídia (tamanho real da sua etiqueta) + sentido de impressão
+LABEL_WIDTH_MM=94
+LABEL_HEIGHT_MM=70
+LABEL_GAP_MM=2
+LABEL_DIRECTION=1                   # 1 = imprime "de baixo pra cima" (o que funcionou pra você)
+
+# Qualidade/velocidade
+LABEL_SPEED=4
+LABEL_DENSITY=12
+
+# Fonte TSPL e escala (mantém o tamanho que ficou bom)
+LABEL_FONT_NAME=4
+LABEL_FONT_SCALE=1
+
+# Centralização horizontal dos TEXTOS (negativo = vai pra ESQUERDA; positivo = DIREITA)
+LABEL_TEXT_CENTER_OFFSET_MM=-11.0   # este valor te deu a centralização boa
+
+# Alturas (a partir do TOPO da etiqueta)
+LABEL_Y_SAP_MM=23                   # “CÓDIGO TÉCNICO SAP”
+LABEL_Y_OCORR_MM=35                 # “Nº OCORRÊNCIA”
+LABEL_Y_PECA_MM=49                  # “PEÇA RETIRADA”
+
+# Linha dos status (um “X” no lugar certo)
+LABEL_Y_STATUS_MM=65                # altura aprovada
+LABEL_X_GOOD_MM=12                  # centros dos parênteses
+LABEL_X_BAD_MM=34
+LABEL_X_DOA_MM=57
+
+# Conteúdos fixos/úteis
+LABEL_CODIGO_TECNICO=20373280
+LABEL_COPIES_PER_QTY=1              # 1 etiqueta por unidade (o bot multiplica pela qtde)
+
+# (Opcional) pequenos ajustes finos – deixe 0 enquanto estiver “95% ok”
+SHIFT_X_GLOBAL=0
+SHIFT_Y_GLOBAL=0
+SHIFT_X_STATUS=0
+SHIFT_Y_STATUS=0
+SHIFT_X_COD_TEC=2
+SHIFT_Y_COD_TEC=0
+SHIFT_X_OCORR=0
+SHIFT_Y_OCORR=0
+SHIFT_X_PROD=0
+SHIFT_Y_PROD=0
 ENV
 fi
 sudo dos2unix "${APP_DIR}/.env" >/dev/null 2>&1 || true
