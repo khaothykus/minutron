@@ -9,6 +9,9 @@ APP_DIR="/home/pi/minutron"
 PYTHON_BIN="python3.11"   # usa 3.11 do Debian Bookworm
 VENV_DIR="${APP_DIR}/.venv"
 
+GECKO_VERSION="v0.35.0"   # versão pedida por você
+GECKO_INSTALL_PATH="/usr/local/bin/geckodriver"
+
 echo "==> Instalando dependências do sistema…"
 sudo apt-get update
 sudo apt-get install -y \
@@ -17,80 +20,11 @@ sudo apt-get install -y \
   python3-uno uno-libs-private \
   firefox-esr ca-certificates fonts-dejavu fonts-liberation \
   fonts-crosextra-carlito fonts-crosextra-caladea \
-  curl wget tar
+  curl wget tar gzip unzip
 
 # Checagens silenciosas (sem DISPLAY)
 firefox-esr -headless --version >/dev/null 2>&1 || true
 libreoffice --headless --version >/dev/null 2>&1 || true
-
-# =========================
-# Instalação do geckodriver
-# =========================
-echo "==> Instalando geckodriver (apt ou fallback para release oficial)..."
-if sudo apt-get install -y geckodriver >/dev/null 2>&1; then
-  echo "-> geckodriver instalado via apt"
-else
-  echo "-> apt não trouxe geckodriver, tentando baixar release oficial..."
-
-  # Detecta arquitetura e escolhe asset name
-  ARCH="$(uname -m)"
-  case "$ARCH" in
-    aarch64|arm64) ASSET_ARCH="linux-aarch64" ;;
-    armv7l)        ASSET_ARCH="linux-arm7hf" ;;
-    x86_64|amd64)  ASSET_ARCH="linux64" ;;
-    *) 
-      echo "Arquitetura $ARCH não reconhecida automaticamente. Saindo."
-      exit 1
-      ;;
-  esac
-
-  # Busca última tag no GitHub releases e monta URL
-  LATEST_JSON="$(curl -sSfL "https://api.github.com/repos/mozilla/geckodriver/releases/latest")" || {
-    echo "Falha ao obter info do GitHub para geckodriver"; exit 1;
-  }
-  TAG="$(printf '%s\n' "$LATEST_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')"
-  if [ -z "$TAG" ]; then
-    echo "Não foi possível detectar tag mais recente do geckodriver"; exit 1;
-  fi
-
-  ASSET_NAME="geckodriver-${TAG#v}-${ASSET_ARCH}.tar.gz"
-  DOWNLOAD_URL="https://github.com/mozilla/geckodriver/releases/download/${TAG}/${ASSET_NAME}"
-
-  echo "-> Tag detectada: $TAG"
-  echo "-> Asset selecionado: $ASSET_NAME"
-  echo "-> Baixando: $DOWNLOAD_URL"
-
-  TMPDIR="$(mktemp -d)"
-  pushd "$TMPDIR" >/dev/null
-
-  if curl -fSLO "$DOWNLOAD_URL"; then
-    tar -xzf "$ASSET_NAME"
-    # extrai geckodriver e instala em /usr/local/bin
-    if [ -f geckodriver ]; then
-      sudo mv -f geckodriver /usr/local/bin/geckodriver
-      sudo chmod +x /usr/local/bin/geckodriver
-      echo "-> geckodriver instalado em /usr/local/bin/geckodriver"
-    else
-      echo "Arquivo geckodriver não encontrado após extrair o tarball"; popd >/dev/null; rm -rf "$TMPDIR"; exit 1
-    fi
-  else
-    echo "Falha no download do geckodriver: $DOWNLOAD_URL"
-    popd >/dev/null
-    rm -rf "$TMPDIR"
-    exit 1
-  fi
-
-  popd >/dev/null
-  rm -rf "$TMPDIR"
-fi
-
-# Verifica versão instalada
-if command -v geckodriver >/dev/null 2>&1; then
-  echo "-> geckodriver --version: $(geckodriver --version | head -n1)"
-else
-  echo "geckodriver não está disponível no PATH após a instalação"
-  exit 1
-fi
 
 echo "==> Preparando diretórios…"
 mkdir -p "${APP_DIR}/data" "${APP_DIR}/app/templates"
@@ -105,6 +39,11 @@ pip install -U pip wheel
 echo "==> Instalando requirements…"
 # Garante deps essenciais no requirements, se não estiverem
 REQ="${APP_DIR}/requirements.txt"
+# cria requirements caso não exista (proteção)
+if [ ! -f "$REQ" ]; then
+  echo "# requirements for minutron" > "$REQ"
+fi
+
 grep -qxF 'reportlab'                 "$REQ" || echo 'reportlab' >> "$REQ"
 grep -qxF 'pypdf'                     "$REQ" || echo 'pypdf' >> "$REQ"
 grep -qxF 'pdfplumber'                "$REQ" || echo 'pdfplumber' >> "$REQ"
@@ -113,6 +52,7 @@ grep -qxF 'pillow'                    "$REQ" || echo 'pillow' >> "$REQ"
 grep -qxF 'selenium'                  "$REQ" || echo 'selenium' >> "$REQ"
 grep -qxF 'python-telegram-bot[job-queue]' "$REQ" || echo 'python-telegram-bot[job-queue]' >> "$REQ"
 grep -qxF 'sdnotify'                  "$REQ" || echo 'sdnotify' >> "$REQ"
+
 pip install -U -r "$REQ"
 deactivate
 
@@ -228,6 +168,99 @@ ENV
 fi
 sudo dos2unix "${APP_DIR}/.env" >/dev/null 2>&1 || true
 sudo chmod 640 "${APP_DIR}/.env"
+
+###########################
+# Instala geckodriver v0.35.0
+###########################
+echo "==> Instalando geckodriver (preferência apt, fallback para release ${GECKO_VERSION})..."
+
+# tenta apt (muitas distros não têm o bin compatível)
+if sudo apt-get install -y geckodriver >/dev/null 2>&1; then
+  echo "-> geckodriver instalado via apt"
+else
+  echo "-> apt não trouxe geckodriver, vamos baixar a release ${GECKO_VERSION} do GitHub..."
+
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    aarch64|arm64) WANT_PAT="linux-aarch64" ;;
+    armv7l)        WANT_PAT="linux-arm7hf" ;;
+    x86_64|amd64)  WANT_PAT="linux64" ;;
+    *) 
+      echo "Arquitetura $ARCH não reconhecida automaticamente. Saindo."
+      exit 1
+      ;;
+  esac
+
+  # Constrói a URL baseada na tag/versão (padrão usado nas releases do geckodriver)
+  # primary guess:
+  ASSET_NAME="geckodriver-${GECKO_VERSION}-${WANT_PAT}.tar.gz"
+  DOWNLOAD_URL="https://github.com/mozilla/geckodriver/releases/download/${GECKO_VERSION}/${ASSET_NAME}"
+
+  TMPDIR="$(mktemp -d)"
+  pushd "$TMPDIR" >/dev/null
+
+  echo "-> Tentando baixar: $DOWNLOAD_URL"
+  if curl -fSLO "$DOWNLOAD_URL"; then
+    TARBALL="$ASSET_NAME"
+  else
+    echo "-> download direto falhou, tentando buscar asset disponível via GitHub API..."
+
+    # fallback: usa API pra identificar o asset correto
+    RELEASE_JSON="$(curl -sSfL "https://api.github.com/repos/mozilla/geckodriver/releases/tags/${GECKO_VERSION}")" || {
+      echo "Falha ao obter info do GitHub para geckodriver ${GECKO_VERSION}"; popd >/dev/null; rm -rf "$TMPDIR"; exit 1;
+    }
+
+    DOWNLOAD_URL="$(printf '%s\n' "$RELEASE_JSON" \
+      | grep -Eo '"browser_download_url":\s*"[^"]+' \
+      | sed -E 's/.*"([^"]+)$/\1/' \
+      | grep -i "${WANT_PAT}" \
+      | grep -i '\.tar\.gz$' \
+      | head -n1 || true)"
+
+    if [ -z "$DOWNLOAD_URL" ]; then
+      # último esforço: qualquer linux*.tar.gz
+      DOWNLOAD_URL="$(printf '%s\n' "$RELEASE_JSON" \
+        | grep -Eo '"browser_download_url":\s*"[^"]+' \
+        | sed -E 's/.*"([^"]+)$/\1/' \
+        | grep -i 'linux' \
+        | grep -i '\.tar\.gz$' \
+        | head -n1 || true)"
+    fi
+
+    if [ -z "$DOWNLOAD_URL" ]; then
+      echo "Não foi possível localizar asset .tar.gz compatível na release ${GECKO_VERSION}."
+      echo "Confira manualmente: https://github.com/mozilla/geckodriver/releases/tag/${GECKO_VERSION}"
+      popd >/dev/null; rm -rf "$TMPDIR"; exit 1
+    fi
+
+    echo "-> Found URL via API: $DOWNLOAD_URL"
+    curl -fSLO "$DOWNLOAD_URL"
+    TARBALL="$(basename "$DOWNLOAD_URL")"
+  fi
+
+  # extrai e instala
+  tar -xzf "$TARBALL"
+  if [ -f geckodriver ]; then
+    sudo mv -f geckodriver "${GECKO_INSTALL_PATH}"
+    sudo chmod +x "${GECKO_INSTALL_PATH}"
+    echo "-> geckodriver instalado em ${GECKO_INSTALL_PATH}"
+  else
+    echo "Arquivo geckodriver não encontrado após extrair o tarball" >&2
+    popd >/dev/null; rm -rf "$TMPDIR"; exit 1
+  fi
+
+  popd >/dev/null
+  rm -rf "$TMPDIR"
+fi
+
+# Verifica versão instalada
+if command -v geckodriver >/dev/null 2>&1; then
+  echo "-> geckodriver --version:"
+  geckodriver --version || true
+else
+  echo "-> geckodriver não encontrado após tentativa de instalação." >&2
+  exit 1
+fi
 
 echo "==> Instalando/atualizando unidade systemd…"
 sudo tee /etc/systemd/system/minutron.service >/dev/null <<UNIT
