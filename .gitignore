@@ -50,6 +50,9 @@ logs/
 *.tmp
 tmp/
 *.bak
+*.bak.*
+*.bkp
+
 
 # =========================
 # Projeto: dados em runtime
