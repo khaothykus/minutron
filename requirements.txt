@@ -7,7 +7,7 @@ pdfplumber==0.11.7
 pypdf==6.0.0
 pypdfium2==4.30.0
 Pillow==11.3.0
-reportlab
+reportlab==4.4.3
 
 # Excel/LibreOffice UNO (usamos 'uno' da distro; não é via pip)
 # (nenhuma lib pip aqui – apenas garantir python3-uno via apt)
@@ -23,6 +23,7 @@ certifi==2025.8.3
 
 # Opcional (sd_notify). O bot tolera ausência, mas deixo disponível:
 sdnotify==0.3.2
+
 pypdf
 pdfplumber
 pdfminer.six
