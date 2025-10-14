@@ -39,6 +39,13 @@ from services.validators import valida_qlid, valida_cidade
 from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes
 from services import etiqueta   # impressão de etiquetas
 
+import pypdfium2 as pdfium
+from io import BytesIO
+from telegram import InputMediaPhoto
+
+from datetime import datetime as _dt
+import re as _re, os as _os
+
 # =========================================
 # LOGGING BÁSICO (vai pro journal)
 # =========================================
@@ -119,6 +126,15 @@ async def _post_shutdown(app):
             logging.info("[sd_notify] STOPPING=1 enviado")
         except Exception:
             pass
+        
+def _fmt_br_date(v: str | None) -> str:
+    if not v:
+        return "—"
+    try:
+        # espera "YYYY-MM-DD" que é como você guarda em st["data"]
+        return _dt.strptime(v, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return v  # se vier em outro formato, devolve como está
 
 SESS = {}
 RAT_TIMEOUT = int(os.getenv("RAT_FLOW_TIMEOUT", "90"))
@@ -128,7 +144,6 @@ _rat_cache = {}
 LABEL_QUEUE: dict[int, list[dict]] = {}  # { user_id: [ {codigo_tecnico, ocorrencia, codigo_produto, status, qtde}, ... ] }
 
 # ========== AUTO-DELETE E PAINEL ==========
-
 # auto-delete de mensagens comuns do bot
 async def _del_msg_job(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data or {}
@@ -149,27 +164,42 @@ async def send_temp(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
         pass
     return m
 
-# painel compacto de status (uma mensagem editada)
+async def step_replace(context, chat_id: int, st: dict, text: str) -> None:
+    """Apaga a box de etapa anterior (se existir) e cria a nova."""
+    mid = st.pop("step_msg_id", None)
+    if mid:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    m = await context.bot.send_message(chat_id=chat_id, text=text)
+    st["step_msg_id"] = m.message_id
+
+
+async def step_clear(context, chat_id: int, st: dict) -> None:
+    """Apaga qualquer box de etapa remanescente."""
+    mid = st.pop("step_msg_id", None)
+    if mid:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+
 def _stats_text(st: dict) -> str:
     s = st.setdefault("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
-    return (
-        "📊 **Status do lote**\n"
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}"
-    )
+    linhas = [
+        "📊 **Status do lote**",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+    ]
+    # Data/Volumes (mostra só se já tiverem sido definidos)
+    data_iso = st.get("data")
+    vols = st.get("volumes")
+    if data_iso or vols is not None:
+        linhas.append(f"📅 Data escolhida: {_fmt_br_date(data_iso)}")
+        linhas.append(f"📦 Volumes: {vols if vols is not None else '—'}")
+    return "\n".join(linhas)
 
-# async def panel_upsert(context: ContextTypes.DEFAULT_TYPE, chat_id: int, st: dict):
-#     """Cria/edita o painel único de status."""
-#     st.setdefault("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
-#     mid = st.get("panel_msg_id")
-#     txt = _stats_text(st)
-#     if mid:
-#         try:
-#             await context.bot.edit_message_text(chat_id=chat_id, message_id=mid, text=txt, parse_mode="Markdown")
-#             return
-#         except Exception:
-#             st["panel_msg_id"] = None
-#     m = await context.bot.send_message(chat_id=chat_id, text=txt, parse_mode="Markdown")
-    # st["panel_msg_id"] = m.message_id
 
 async def panel_upsert(context, chat_id: int, st: dict):
     txt = _stats_text(st)
@@ -230,18 +260,32 @@ async def reset_lote(uid: int, chat_id: int, context, st: dict | None = None, ha
     st["stats"] = {"recv": 0, "ok": 0, "dup": 0, "bad": 0}
     st["danfe_keys"] = set()
     st["danfe_hashes"] = set()
+    st["cleanup_ids"] = {}
 
     # 4) zera controle do lote
     st["sid"] = ""
     st["volbuf"] = ""
     st["data"] = ""
 
+# def _panel_finalize_text(st: dict) -> str:
+#     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
+#     return (
+#         "✅ **Lote finalizado**\n"
+#         f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}"
+#     )
+
 def _panel_finalize_text(st: dict) -> str:
     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
-    return (
-        "✅ **Lote finalizado**\n"
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}"
-    )
+    linhas = [
+        "✅ **Lote finalizado**",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+    ]
+    data_iso = st.get("data")
+    vols = st.get("volumes")
+    if data_iso or vols is not None:
+        linhas.append(f"📅 Data escolhida: {_fmt_br_date(data_iso)}")
+        linhas.append(f"📦 Volumes: {vols if vols is not None else '—'}")
+    return "\n".join(linhas)
 
 async def panel_cleanup(context, chat_id: int, st: dict, mode: str = "finalize", ttl: int = 20):
     """
@@ -280,63 +324,85 @@ async def panel_cleanup(context, chat_id: int, st: dict, mode: str = "finalize",
         if ttl and ttl > 0:
             try:
                 context.job_queue.run_once(
-                    _del_msg_job,
-                    when=ttl,
-                    data={"chat_id": chat_id, "message_id": mid},
+                    _del_msg_job, when=ttl, data={"chat_id": chat_id, "message_id": mid}
                 )
             except Exception:
                 pass
         return
+    # keep: não faz nada
 
-    # keep -> não faz nada
-    
-# --- Fechamento automático do painel/lote ---
 async def _maybe_cleanup_lote(context, chat_id: int, uid: int, st: dict):
-    """
-    Fecha o painel do lote quando:
-      - minuta já foi entregue, e
-      - já houve decisão de imprimir ou não a minuta, e
-      - etiquetas: já houve decisão OU não estão habilitadas.
-    """
-    # flags do fluxo
+    """Fecha o painel quando as condições de conclusão do lote foram satisfeitas."""
+    import os
     minuta_ok = st.get("minuta_entregue") is True
     minuta_decidida = st.get("minuta_decidida") is True
     labels_enabled = (os.getenv("LABELS_ENABLED", "0") == "1")
     labels_decididas = st.get("labels_decididas") is True
 
-    if not minuta_ok:
-        return  # ainda não entregou minuta (não fecha)
+    # ainda não pode fechar?
+    if not minuta_ok or not minuta_decidida or (labels_enabled and not labels_decididas):
+        return
 
-    if not minuta_decidida:
-        return  # ainda não decidiu sobre impressão da minuta
-
-    if labels_enabled and not labels_decididas:
-        return  # etiquetas habilitadas, mas ainda sem decisão
-
-    # chegou aqui? pode limpar painel e zerar lote
-    mode = os.getenv("PANEL_CLEANUP_MODE", "finalize")  # 'finalize' | 'delete' | 'keep'
+    # limpa/encerra painel conforme .env
+    mode = os.getenv("PANEL_CLEANUP_MODE", "finalize")  # finalize|delete|keep
     ttl = int(os.getenv("PANEL_CLEANUP_TTL", "20") or "20")
     try:
         await panel_cleanup(context, chat_id, st, mode=mode, ttl=ttl)
     except Exception:
         pass
 
-    # zera estado do lote para o próximo
+    # zera estado do lote
     st["panel_msg_id"] = None
     st["stats"] = {"recv": 0, "ok": 0, "dup": 0, "bad": 0}
     st["danfe_keys"] = set()
     st["danfe_hashes"] = set()
+    # st["cleanup_ids"] = {}
 
-    # limpa buffers na SESS do usuário correto (uid!)
+    # zera buffers/sid no SESS do **uid**
     sess = SESS.setdefault(uid, {})
-    for k in ("sid", "volbuf", "data"):
+    for k in ("sid", "volbuf", "data", "volumes"):
         sess[k] = ""
     for k in ("progress_msg_id", "progress_sid", "progress_text",
               "cleanup_ids", "last_danfe_count", "warned_incomplete"):
         sess.pop(k, None)
 
+async def _send_minuta_preview(context, chat_id: int, minuta_pdf: str, pages=(0,1), scale=2):
+    """
+    Renderiza páginas da minuta (somente do PDF da minuta) e envia como media group
+    (ou uma única foto se só 1 página pedida).
+    pages usa índice zero-based (0 = primeira página).
+    """
+    images = []
+    try:
+        doc = pdfium.PdfDocument(minuta_pdf)
+        for p in pages:
+            if p < 0 or p >= len(doc):
+                continue
+            page = doc.get_page(p)
+            bitmap = page.render(scale=scale)  # 2x ~ 144dpi
+            pil = bitmap.to_pil()
+            bio = BytesIO()
+            pil.save(bio, format="PNG")
+            bio.seek(0)
+            images.append(bio)
+            page.close()
+        doc.close()
+    except Exception:
+        return
 
+    if not images:
+        return
 
+    if len(images) == 1:
+        await context.bot.send_photo(chat_id=chat_id, photo=images[0], caption="Prévia da minuta (páginas iniciais)")
+    else:
+        # até 10 imagens por grupo; aqui só 2
+        from telegram import InputMediaPhoto
+        media = [InputMediaPhoto(images[0])]
+        for im in images[1:]:
+            media.append(InputMediaPhoto(im))
+        await context.bot.send_media_group(chat_id=chat_id, media=media)
+        
 # ========== LIMPEZA ANTIGA (mantido, mas usado menos) ==========
 async def limpar_mensagens_antigas(st, context, chat_id):
     for mid in st.get("cleanup_ids", []):
@@ -353,19 +419,20 @@ async def orientar_envio_pdf(context, chat_id):
         context,
         chat_id,
         (
-            "⚠️ Este tipo de arquivo não é aceito.\n\n"
-            "Para enviar corretamente:\n"
-            "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
-            "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
-            "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
-            "4️⃣ Envie.\n\n"
-            "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
+            "⚠️ Este tipo de arquivo não é aceito."
+            # "\n\nPara enviar corretamente:\n"
+            # "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
+            # "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
+            # "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
+            # "4️⃣ Envie.\n\n"
+            # "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
         ),
     )
 
 # ========== START ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
+    chat_id = update.effective_chat.id
     st = SESS.setdefault(u.id, {})
     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
     qlid, rec = storage.users_find_by_tg(u.id)
@@ -374,12 +441,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["stats"] = {"recv": 0, "ok": 0, "dup": 0, "bad": 0}
     st["danfe_keys"] = set()
     st["danfe_hashes"] = set()
+    # st["cleanup_ids"] = {}
     st["panel_msg_id"] = None
     st["sid"] = ""
     st["volbuf"] = ""
     st["data"] = ""
-    # await panel_upsert(context, update.effective_chat.id, st)
-
 
     base = {
         "qlid": "",
@@ -401,12 +467,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base["msg_recebimento_id"] = msg_id
         base["blocked"] = rec.get("blocked", False)
         SESS[u.id] = base
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"👋 Bem-vindo, {u.first_name}!\n\n📎 Envie suas DANFEs em PDF para começar.",
-            reply_markup=None
+        # await context.bot.send_message(
+        #     chat_id=update.effective_chat.id,
+        #     text=f"👋 Bem-vindo, {u.first_name}!\n\n📎 Envie suas DANFEs em PDF para começar.",
+        #     reply_markup=None
+        # )
+        # boas-vindas personalizadas (some sozinha)
+        first = (update.effective_user.first_name or "").strip() or "bem-vindo"
+        await send_temp(
+            context,
+            chat_id,
+            f"👋 Bem-vindo, {first}!\n\n📎 Envie suas DANFEs em PDF para começar.",
+            seconds=20,
         )
-        # await panel_upsert(context, update.effective_chat.id, SESS[u.id])
     else:
         SESS[u.id] = base
         await update.message.reply_text(
@@ -569,6 +642,7 @@ async def bloquear_anexo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
     finally:
         await orientar_envio_pdf(context, msg.chat.id)
+        pass
 
 # ===== DOCUMENTOS =====
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -600,16 +674,17 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await orientar_envio_pdf(context, msg.chat.id)
         await msg.delete()
         return
-
-    if not st["sid"]:
-        # zera e recomeça (não apaga nada extra, só garante estado inicial)
+    
+    if not st.get("sid"):  # novo lote
         st["stats"] = {"recv": 0, "ok": 0, "dup": 0, "bad": 0}
         st["danfe_keys"] = set()
         st["danfe_hashes"] = set()
+        # st["cleanup_ids"] = {}
         st["panel_msg_id"] = None
         st["last_danfe_count"] = 0
         st["sid"] = storage.new_session(st["qlid"])
-        # cria painel zerado já
+
+        # cria o painel zerado (sem argumentos extras!)
         await panel_upsert(context, msg.chat.id, st)
 
     dest = storage.save_pdf(st["qlid"], st["sid"], doc.file_name)
@@ -751,6 +826,12 @@ async def on_print_labels(update, context):
 
         msg = f"✅ Enviado para impressão: {total} etiqueta(s)." if total > 0 else "⚠️ Nenhuma etiqueta foi impressa."
         await send_temp(context, cq.message.chat.id, msg, seconds=8)
+        
+        # --- marca decisão das ETIQUETAS e tenta fechar lote ---
+        st = SESS.setdefault(cq.from_user.id, {})
+        st["labels_decididas"] = True
+        await _maybe_cleanup_lote(context, cq.message.chat.id, cq.from_user.id, st)
+
 
     except Exception as e:
         await send_temp(context, cq.message.chat.id, f"❌ Erro ao imprimir: {e}", seconds=8)
@@ -761,8 +842,14 @@ async def on_skip_labels(update, context):
     cq = update.callback_query
     await cq.answer()
     LABEL_QUEUE.pop(cq.from_user.id, None)
-    await send_temp(context, cq.message.chat.id, "✅ Ok, não vou imprimir etiqueta.", seconds=6)
+    # await send_temp(context, cq.message.chat.id, "✅ Ok, não vou imprimir etiqueta.", seconds=6)
     await safe_delete_message(cq=cq)
+    
+    # --- marca decisão das ETIQUETAS e tenta fechar lote ---
+    st = SESS.setdefault(cq.from_user.id, {})
+    st["labels_decididas"] = True
+    await _maybe_cleanup_lote(context, cq.message.chat.id, cq.from_user.id, st)
+
 
 # —— callback de impressão da MINUTA ——
 async def on_print_minuta_cb(update, context):
@@ -787,162 +874,22 @@ async def on_print_minuta_cb(update, context):
             else:
                 msg_txt = "🖨️ Minuta enviada para impressão."
         elif choice == "no":
-            msg_txt = "✅ Ok, não vou imprimir minuta."
+            # msg_txt = "✅ Ok, não vou imprimir minuta."
+            pass
         try:
             await cq.message.delete()
         except Exception:
             pass
-        await send_temp(context, cq.message.chat.id, msg_txt, seconds=8)
+        # await send_temp(context, cq.message.chat.id, msg_txt, seconds=8)
+        st = SESS.setdefault(cq.from_user.id, {})
+        st["minuta_decidida"] = True
+        await _maybe_cleanup_lote(context, cq.message.chat.id, cq.from_user.id, st)
+
     except Exception as e:
         try:
             await send_temp(context, update.effective_chat.id, f"Erro no callback de impressão da minuta: {e}", seconds=8)
         except Exception:
             pass
-
-# ===== PROCESSAR LOTE =====
-async def processar_lote(cq, context, st, volumes: int):
-    import traceback, os
-    uid = cq.from_user.id
-
-    if not isinstance(st, dict):
-        st = SESS.setdefault(uid, {})
-
-    chat_id = cq.message.chat.id
-    qlid = st.get("qlid")
-    sid = st.get("sid")
-
-    if not sid:
-        await cq.message.edit_text("Nenhuma DANFE no lote atual.")
-        return
-
-    pdfs_dir = f"{storage.user_dir(qlid)}/temp/{sid}/pdfs"
-    pdfs = [os.path.join(pdfs_dir, f) for f in os.listdir(pdfs_dir) if f.lower().endswith(".pdf")]
-    if not pdfs:
-        await cq.message.edit_text("Nenhuma DANFE no lote atual.")
-        return
-
-    try:
-        await cq.message.reply_text(f"🧐 Lendo {len(pdfs)} DANFEs…")
-        header, produtos = danfe_parser.parse_lote(pdfs)
-
-        await cq.message.reply_text("🔍 Fazendo a busca do RAT… isso pode levar alguns minutos.")
-        for p in produtos:
-            if not p.get("ocorrencia"):
-                p["ocorrencia"] = "-"
-
-            rat = None
-            key = (p["ocorrencia"], p["codigo_prod"])
-            rat = _rat_cache.get(key)
-
-            if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
-                try:
-                    rat = await asyncio.wait_for(
-                        asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p["codigo_prod"]),
-                        timeout=RAT_TIMEOUT + 10
-                    )
-                except asyncio.TimeoutError:
-                    rat = None
-                except Exception:
-                    rat = None
-
-            if not rat:
-                s = (p.get("status") or "").upper()
-                if s == "BOM":
-                    rat = "GOOD"
-                elif s == "DOA":
-                    rat = "DOA"
-                elif s == "RUIM":
-                    rat = ""
-                else:
-                    rat = "-"
-
-            p["rat"] = rat
-            _rat_cache[key] = rat
-
-        out_pdf = storage.output_pdf_path(qlid)
-        await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
-        await asyncio.to_thread(preencher_e_exportar_lote, qlid, st.get("cidade"), header, produtos, st.get("data"), volumes, out_pdf)
-
-        shim = _CQUpdateShim(cq)
-        await finalize_minuta_and_print(
-            shim,
-            context,
-            minuta_pdf_path=out_pdf,
-            danfe_paths=pdfs,
-        )
-
-        # Pergunta de etiquetas (apenas admin + habilitado)
-        try:
-            is_enabled = os.getenv("LABELS_ENABLED", "0") == "1"
-            if is_enabled and is_admin(shim):
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-                itens = []
-                cod_tec_fix = os.getenv("LABEL_CODIGO_TECNICO", "20373280")
-                for p in produtos:
-                    sraw = (p.get("status") or "").strip().upper()
-                    if sraw == "BOM":
-                        status_norm = "good"
-                    elif sraw == "DOA":
-                        status_norm = "doa"
-                    elif sraw == "RUIM":
-                        status_norm = "bad"
-                    else:
-                        status_norm = ""
-
-                    itens.append({
-                        "codigo_tecnico": cod_tec_fix,
-                        "ocorrencia": p.get("ocorrencia") or "",
-                        "codigo_produto": p.get("codigo_prod") or "",
-                        "status": status_norm,
-                        "qtde": int(float(p.get("qtde", 1) or 1)),
-                    })
-
-                LABEL_QUEUE[cq.from_user.id] = itens
-                await cq.message.reply_text(
-                    "🖨️ Deseja imprimir as etiquetas deste lote?",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🖨️ Imprimir etiqueta", callback_data="print_labels"),
-                         InlineKeyboardButton("❌ Não imprimir",    callback_data="skip_labels")]
-                    ])
-                )
-        except Exception:
-            pass
-
-    except Exception as e:
-        await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta.\nDetalhes: {e}")
-        traceback.print_exc()
-    finally:
-        try:
-            if sid:
-                storage.finalize_session(qlid, sid)
-        except Exception:
-            pass
-            
-        # --- limpeza do painel conforme .env ---
-        mode = os.getenv("PANEL_CLEANUP_MODE", "finalize")  # 'finalize' | 'delete' | 'keep'
-        ttl = int(os.getenv("PANEL_CLEANUP_TTL", "20") or "20")
-        try:
-            await panel_cleanup(context, chat_id, st, mode=mode, ttl=ttl)
-        except Exception:
-            pass
-        
-        # 2) reset geral do lote (apaga msg de progresso e zera tudo)
-        try:
-            await reset_lote(uid, chat_id, context, st, hard_delete_panel=(mode == "delete"))
-        except Exception:
-            pass
-            
-        # # zera para o próximo lote
-        # st["panel_msg_id"] = None
-        # st["stats"] = {"recv": 0, "ok": 0, "dup": 0, "bad": 0}
-        # st["danfe_keys"] = set()
-        # st["danfe_hashes"] = set()
-
-        sess = SESS.setdefault(uid, {})
-        for k in ("sid", "volbuf", "data"):
-            sess[k] = ""
-        for k in ("progress_msg_id","progress_sid","progress_text","cleanup_ids","last_danfe_count","warned_incomplete"):
-            sess.pop(k, None)
 
 # ===== MAIN =====
     
@@ -1077,16 +1024,86 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    # # ----- Data escolhida -----
+    # if cq.data.startswith("data_"):
+    #     raw_data = cq.data[5:]
+    #     try:
+    #         data_formatada = datetime.strptime(raw_data, "%Y-%m-%d").strftime("%d/%m/%Y")
+    #     except:
+    #         data_formatada = raw_data  # fallback
+
+    #     st["data"] = raw_data
+    #     st["volbuf"] = ""
+    #     try:
+    #         await cq.message.edit_text(
+    #             f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
+    #             reply_markup=kb_volumes()
+    #         )
+    #     except BadRequest:
+    #         await context.bot.send_message(
+    #             chat_id=update.effective_chat.id,
+    #             text=f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
+    #             reply_markup=kb_volumes()
+    #         )
+    #     return
+
+    # # ----- Teclado de volumes -----
+    # if cq.data.startswith("vol_"):
+    #     # Formata a data salva para exibir
+    #     try:
+    #         data_formatada = datetime.strptime(st["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
+    #     except:
+    #         data_formatada = st["data"]
+
+    #     if cq.data == "vol_del":
+    #         st["volbuf"] = st.get("volbuf", "")[:-1]
+    #     elif cq.data == "vol_ok":
+    #         vol = st.get("volbuf", "0")
+    #         if not vol or vol == "0":
+    #             try:
+    #                 await cq.message.edit_text(
+    #                     f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
+    #                     reply_markup=kb_volumes(st["volbuf"])
+    #                 )
+    #             except BadRequest:
+    #                 await context.bot.send_message(
+    #                     chat_id=update.effective_chat.id,
+    #                     text=f"📅 Data escolhida: {data_formatada}\n📦 Volumes deve ser inteiro > 0.",
+    #                     reply_markup=kb_volumes(st["volbuf"])
+    #                 )
+    #             return
+    #         await cq.message.edit_reply_markup(reply_markup=None)
+    #         await processar_lote(cq, context, st, int(vol))
+    #         return
+    #     else:
+    #         st["volbuf"] = (st.get("volbuf", "") + cq.data.split("_")[1])[:4]
+
+    #     try:
+    #         await cq.message.edit_text(
+    #             f"📅 Data escolhida: {data_formatada}\n📦 Volumes: {st['volbuf'] or '-'}",
+    #             reply_markup=kb_volumes(st["volbuf"])
+    #         )
+    #     except BadRequest:
+    #         await context.bot.send_message(
+    #             chat_id=update.effective_chat.id,
+    #             text=f"📅 Data escolhida: {data_formatada}\n📦 Volumes: {st['volbuf'] or '-'}",
+    #             reply_markup=kb_volumes(st["volbuf"])
+    #         )
+    #     return
+    
     # ----- Data escolhida -----
     if cq.data.startswith("data_"):
         raw_data = cq.data[5:]
         try:
             data_formatada = datetime.strptime(raw_data, "%Y-%m-%d").strftime("%d/%m/%Y")
-        except:
+        except Exception:
             data_formatada = raw_data  # fallback
 
         st["data"] = raw_data
         st["volbuf"] = ""
+        st["volumes"] = None  # só definimos quando confirmar
+
+        # NÃO atualiza painel aqui; somente quando volumes forem confirmados
         try:
             await cq.message.edit_text(
                 f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
@@ -1105,32 +1122,52 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Formata a data salva para exibir
         try:
             data_formatada = datetime.strptime(st["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
-        except:
+        except Exception:
             data_formatada = st["data"]
 
         if cq.data == "vol_del":
             st["volbuf"] = st.get("volbuf", "")[:-1]
+
         elif cq.data == "vol_ok":
             vol = st.get("volbuf", "0")
             if not vol or vol == "0":
+                # mantém mesma mensagem com o teclado
                 try:
                     await cq.message.edit_text(
-                        f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
+                        f"📅 Data escolhida: {data_formatada}\n⚠️ Volumes deve ser inteiro > 0.",
                         reply_markup=kb_volumes(st["volbuf"])
                     )
                 except BadRequest:
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        text=f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
+                        text=f"📅 Data escolhida: {data_formatada}\n⚠️ Volumes deve ser inteiro > 0.",
                         reply_markup=kb_volumes(st["volbuf"])
                     )
                 return
-            await cq.message.edit_reply_markup(reply_markup=None)
+
+            # Confirma volumes
+            st["volumes"] = int(vol)
+            
+            # Some com a caixa de seleção (não queremos acumular)
+            try:
+                await cq.message.delete()
+            except Exception:
+                try:
+                    await cq.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+            
+            # AGORA sim atualiza o painel com Data + Volumes
+            await panel_upsert(context, cq.message.chat.id, st)
+
+            # Inicia o processamento do lote
             await processar_lote(cq, context, st, int(vol))
             return
+
         else:
             st["volbuf"] = (st.get("volbuf", "") + cq.data.split("_")[1])[:4]
 
+        # Enquanto digita volumes, só atualiza a mesma mensagem (sem painel)
         try:
             await cq.message.edit_text(
                 f"📅 Data escolhida: {data_formatada}\nVolumes: {st['volbuf'] or '-'}",
@@ -1143,45 +1180,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_volumes(st["volbuf"])
             )
         return
-    
-# # —— callback de impressão da MINUTA ——
-# async def on_print_minuta_cb(update, context):
-#     """Trata clique nos botões 'Imprimir minuta' / 'Não imprimir' e apaga a mensagem de botões."""
-#     try:
-#         cq = update.callback_query
-#         await cq.answer()
-#         choice = cq.data.split(":")[1]  # yes | no
-#         # pega caminho salvo no fluxo
-#         pdf_path = context.user_data.get("last_minuta_pdf")
-#         msg_txt = "Minuta: opção não reconhecida."
-#         if choice == "yes":
-#             if pdf_path:
-#                 try:
-#                     from services.print_integration import _lp_print, PRINT_ENABLE, is_admin
-#                 except Exception:
-#                     # caminho alternativo se o pacote estiver plano
-#                     from services.print_integration import _lp_print, PRINT_ENABLE, is_admin
-#                 if PRINT_ENABLE and is_admin(update):
-#                     ok, m = _lp_print(str(pdf_path))
-#                     msg_txt = "🖨️ Minuta enviada para impressão." if ok else f"❌ Falha ao imprimir a minuta: {m}"
-#                 else:
-#                     msg_txt = "🖨️ Minuta enviada para impressão."
-#             else:
-#                 msg_txt = "🖨️ Minuta enviada para impressão."
-#         elif choice == "no":
-#             msg_txt = "✅ Ok, não vou imprimir minuta."
-#         # apaga a mensagem de botões
-#         try:
-#             await cq.message.delete()
-#         except Exception:
-#             pass
-#         # confirma em nova mensagem
-#         await cq.message.chat.send_message(msg_txt)
-#     except Exception as e:
-#         try:
-#             await update.effective_chat.send_message(f"Erro no callback de impressão da minuta: {e}")
-#         except Exception:
-#             pass
 
 
 # ===== PROCESSAR LOTE =====
@@ -1208,10 +1206,11 @@ async def processar_lote(cq, context, st, volumes: int):
         return
 
     try:
-        await cq.message.reply_text(f"🧐 Lendo {len(pdfs)} DANFEs…")
+        # await cq.message.reply_text(f"🧐 Lendo {len(pdfs)} DANFEs…")
+        await step_replace(context, chat_id, st, f"🤔 Lendo {len(pdfs)} DANFEs...")
         header, produtos = danfe_parser.parse_lote(pdfs)
-
-        await cq.message.reply_text("🔍 Fazendo a busca do RAT… isso pode levar alguns minutos.")
+        # await cq.message.reply_text("🔍 Fazendo a busca do RAT… isso pode levar alguns minutos.")
+        await step_replace(context, chat_id, st, "🔍 Fazendo a busca do RAT... isso pode levar alguns minutos.")
         for p in produtos:
             # Se não tem ocorrência, define como "-"
             if not p.get("ocorrencia"):
@@ -1248,8 +1247,30 @@ async def processar_lote(cq, context, st, volumes: int):
             _rat_cache[key] = rat
 
         out_pdf = storage.output_pdf_path(qlid)
-        await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
+        # injeta a data escolhida no nome do PDF
+        data_tag = None
+        if st.get("data"):
+            try:
+                # se vier aaaa/mm/dd normaliza para DDMMAAAA
+                data_tag = _dt.strptime(st["data"], "%Y%m%d").strftime("%d/%m/%Y")
+            except Exception:
+                # fallback: só dígitos
+                data_tag = _re.sub(r"\D+", "", st["data"])
+                
+        # caminho original
+        out_pdf = storage.output_pdf_path(qlid)
+
+        base, ext = os.path.splitext(out_pdf)
+        if data_tag:
+            # base, ext = _os.path.splitext(out_pdf)
+            out_pdf = f"{base}_{data_tag}{ext}"
+    
+        # await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
+        await step_replace(context, chat_id, st, "🧾 Preenchendo a minuta e gerando PDF...")
         await asyncio.to_thread(preencher_e_exportar_lote, qlid, st.get("cidade"), header, produtos, st.get("data"), volumes, out_pdf)
+    
+        # preview das 1–2 primeiras páginas da MINUTA (sem DANFEs)
+        await _send_minuta_preview(context, chat_id, out_pdf, pages=(0,1))
 
         # === NOVO: envia (e imprime se habilitado) usando a integração ===
         # Passamos também a lista de DANFEs para, se configurado, juntar no final.
@@ -1260,6 +1281,24 @@ async def processar_lote(cq, context, st, volumes: int):
             minuta_pdf_path=out_pdf,
             danfe_paths=pdfs,
         )
+        
+        # === depois de enviar a minuta (lote) ===
+        st["minuta_entregue"] = True
+
+        # se não for admin, não terá botões => considera decidido
+        is_admin_user = is_admin(shim)
+        if not is_admin_user:
+            st["minuta_decidida"] = True
+            st["labels_decididas"] = True  # sem botões de etiqueta para não-admin
+
+        # se etiquetas estão desativadas no .env, considera decidido também
+        if os.getenv("LABELS_ENABLED", "0") != "1":
+            st["labels_decididas"] = True
+
+        # tenta fechar o lote agora; se for admin e houver botões pendentes,
+        # o fechamento ocorrerá depois dos cliques nos callbacks (item 5)
+        await _maybe_cleanup_lote(context, chat_id, uid, st)
+
 
         # --- Pergunta de etiquetas (apenas admin + habilitado) ---
         try:
@@ -1289,13 +1328,6 @@ async def processar_lote(cq, context, st, volumes: int):
                     })
 
                 LABEL_QUEUE[cq.from_user.id] = itens
-                # await cq.message.reply_text(
-                #     "🖨️ Deseja imprimir as etiquetas deste lote?",
-                #     reply_markup=InlineKeyboardMarkup([
-                #         [InlineKeyboardButton("🖨️ Imprimir agora", callback_data="print_labels")],
-                #         [InlineKeyboardButton("❌ Não imprimir",    callback_data="skip_labels")],
-                #     ])
-                # )
                 await cq.message.reply_text(
                     "🖨️ Deseja imprimir as etiquetas deste lote?",
                     reply_markup=InlineKeyboardMarkup([
@@ -1312,6 +1344,11 @@ async def processar_lote(cq, context, st, volumes: int):
         await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta. Detalhes: {e}")
         traceback.print_exc()
     finally:
+        try:
+            await step_clear(context, chat_id, st)
+        except Exception:
+            pass
+
         # Limpeza segura
         try:
             if sid:
@@ -1320,7 +1357,8 @@ async def processar_lote(cq, context, st, volumes: int):
             pass
 
         sess = SESS.setdefault(uid, {})
-        for k in ("sid", "volbuf", "data"):
+        # for k in ("sid", "volbuf", "data"):
+        for k in ("sid", "volbuf"):
             sess[k] = ""
         for k in ("progress_msg_id","progress_sid","progress_text","cleanup_ids","last_danfe_count","warned_incomplete"):
             sess.pop(k, None)
@@ -1367,7 +1405,8 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, bloquear_anexo))
     app.add_handler(MessageHandler(filters.ANIMATION, bloquear_anexo))
 
-    app.run_polling()
+    # app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)  # evita warning de tipos não tratados
 
 if __name__ == "__main__":
     main()
