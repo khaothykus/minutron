@@ -49,3 +49,17 @@ __all__ = [
     "ENV",
     "LOG_LEVEL",
 ]
+
+# --- Performance knobs ---
+# 0 = auto (reservado p/ patch 2/2 de parse paralelo)
+PARSE_WORKERS = int(os.getenv("PARSE_WORKERS", "0"))
+RAT_CONCURRENCY = int(os.getenv("RAT_CONCURRENCY", "4"))
+PREVIEW_ENABLED = os.getenv("PREVIEW_ENABLED", "1") == "1"
+PREVIEW_PAGES = int(os.getenv("PREVIEW_PAGES", "1"))
+PREVIEW_DPI = int(os.getenv("PREVIEW_DPI", "90"))
+
+# --- Cache de DANFE (parse) ---
+DANFE_CACHE_ENABLED = os.getenv("DANFE_CACHE_ENABLED", "1") == "1"
+DANFE_CACHE_DIR = Path(os.getenv("DANFE_CACHE_DIR", str(BASE_DATA_DIR / "cache" / "danfe")))
+DANFE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+

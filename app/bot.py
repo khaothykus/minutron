@@ -35,6 +35,45 @@ from services import storage, danfe_parser
 # from services.excel_filler_spire import preencher_e_exportar_lote
 from services.excel_filler_uno import preencher_e_exportar_lote
 from services.rat_search import get_rat_for_ocorrencia
+
+# ---- RAT concurrency helper (bounded) ----
+from config import RAT_CONCURRENCY
+async def _resolve_rats_concurrent(produtos: list[dict], timeout_s: int, cache: dict):
+    import asyncio
+    sem = asyncio.Semaphore(max(1, RAT_CONCURRENCY))
+
+    async def _one(p: dict):
+        if not p.get("ocorrencia"):
+            p["ocorrencia"] = "-"
+        key = (p["ocorrencia"], p.get("codigo_prod"))
+        rat = cache.get(key)
+
+        if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
+            async with sem:
+                try:
+                    rat = await asyncio.wait_for(
+                        asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p.get("codigo_prod")),
+                        timeout=timeout_s,
+                    )
+                except Exception:
+                    rat = None
+
+        if not rat:
+            s = (p.get("status") or "").upper()
+            if s == "BOM":
+                rat = "GOOD"
+            elif s == "DOA":
+                rat = "DOA"
+            elif s == "RUIM":
+                rat = ""
+            else:
+                rat = "-"
+
+        p["rat"] = rat
+        cache[key] = rat
+
+    await asyncio.gather(*(_one(p) for p in produtos))
+    
 from services.validators import valida_qlid, valida_cidade
 from keyboards import kb_cadastro, kb_main, kb_datas, kb_volumes
 from services import etiqueta   # impressão de etiquetas
@@ -190,7 +229,8 @@ def _stats_text(st: dict) -> str:
     s = st.setdefault("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "📊 **Status do lote**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        # f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']}\n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
     # Data/Volumes (mostra só se já tiverem sido definidos)
     data_iso = st.get("data")
@@ -278,7 +318,8 @@ def _panel_finalize_text(st: dict) -> str:
     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "✅ **Lote finalizado**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        # f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']}\n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
     data_iso = st.get("data")
     vols = st.get("volumes")
@@ -415,19 +456,20 @@ async def limpar_mensagens_antigas(st, context, chat_id):
 # ========== ORIENTAÇÃO DE ENVIO ==========
 async def orientar_envio_pdf(context, chat_id):
     # agora como mensagem temporária
-    await send_temp(
-        context,
-        chat_id,
-        (
-            "⚠️ Este tipo de arquivo não é aceito."
-            # "\n\nPara enviar corretamente:\n"
-            # "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
-            # "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
-            # "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
-            # "4️⃣ Envie.\n\n"
-            # "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
-        ),
-    )
+    # await send_temp(
+    #     context,
+    #     chat_id,
+    #     (
+    #         "⚠️ Este tipo de arquivo não é aceito."
+    #         # "\n\nPara enviar corretamente:\n"
+    #         # "1️⃣ Toque no 📎 *clipe de papel* (ou 'Anexar') no campo de mensagem.\n"
+    #         # "2️⃣ Escolha *Arquivo* (não Foto nem Galeria).\n"
+    #         # "3️⃣ Localize o seu arquivo *.PDF* no celular ou computador.\n"
+    #         # "4️⃣ Envie.\n\n"
+    #         # "💡 Dica: PDFs de DANFE geralmente vêm do sistema da transportadora ou do emissor da nota."
+    #     ),
+    # )
+    pass
 
 # ========== START ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,9 +739,9 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not danfe_parser.is_danfe(dest):
         st["stats"]["bad"] += 1
         await panel_upsert(context, msg.chat.id, st)
-        await send_temp(context, msg.chat.id, "❌ Arquivo não é uma DANFE válida. Tente outro PDF.", seconds=8)
+        # await send_temp(context, msg.chat.id, "❌ Arquivo não é uma DANFE válida. Tente outro PDF.", seconds=8)
         os.remove(dest)
-        await msg.delete()
+        # await msg.delete()
         return
 
     # --- dedupe por CHAVE 44 dígitos + fallback por hash
@@ -715,23 +757,23 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ch and ch in st["danfe_keys"]:
         st["stats"]["dup"] += 1
         await panel_upsert(context, msg.chat.id, st)
-        await send_temp(context, msg.chat.id, "⚠️ DANFE repetida (mesma chave). Ignorando este arquivo.", seconds=6)
+        # await send_temp(context, msg.chat.id, "⚠️ DANFE repetida (mesma chave). Ignorando este arquivo.", seconds=6)
         try:
             os.remove(dest)
         except Exception:
             pass
-        await msg.delete()
+        # await msg.delete()
         return
 
     if (not ch) and (sha1 in st["danfe_hashes"]):
         st["stats"]["dup"] += 1
         await panel_upsert(context, msg.chat.id, st)
-        await send_temp(context, msg.chat.id, "⚠️ DANFE repetida (mesmo arquivo). Ignorando este PDF.", seconds=6)
+        # await send_temp(context, msg.chat.id, "⚠️ DANFE repetida (mesmo arquivo). Ignorando este PDF.", seconds=6)
         try:
             os.remove(dest)
         except Exception:
             pass
-        await msg.delete()
+        # await msg.delete()
         return
 
     if ch:
@@ -1208,43 +1250,47 @@ async def processar_lote(cq, context, st, volumes: int):
     try:
         # await cq.message.reply_text(f"🧐 Lendo {len(pdfs)} DANFEs…")
         await step_replace(context, chat_id, st, f"🤔 Lendo {len(pdfs)} DANFEs...")
-        header, produtos = danfe_parser.parse_lote(pdfs)
+        # header, produtos = danfe_parser.parse_lote(pdfs)
+        header, produtos = getattr(danfe_parser, "parse_lote_parallel", danfe_parser.parse_lote)(pdfs)
         # await cq.message.reply_text("🔍 Fazendo a busca do RAT… isso pode levar alguns minutos.")
         await step_replace(context, chat_id, st, "🔍 Fazendo a busca do RAT... isso pode levar alguns minutos.")
-        for p in produtos:
-            # Se não tem ocorrência, define como "-"
-            if not p.get("ocorrencia"):
-                p["ocorrencia"] = "-"
+        # for p in produtos:
+        #     # Se não tem ocorrência, define como "-"
+        #     if not p.get("ocorrencia"):
+        #         p["ocorrencia"] = "-"
 
-            rat = None
-            key = (p["ocorrencia"], p["codigo_prod"])
-            rat = _rat_cache.get(key)
+        #     rat = None
+        #     key = (p["ocorrencia"], p["codigo_prod"])
+        #     rat = _rat_cache.get(key)
 
-            if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
-                try:
-                    rat = await asyncio.wait_for(
-                        asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p["codigo_prod"]),
-                        timeout=RAT_TIMEOUT + 10
-                    )
-                except asyncio.TimeoutError:
-                    rat = None
-                except Exception:
-                    rat = None
+        #     if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
+        #         try:
+        #             rat = await asyncio.wait_for(
+        #                 asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p["codigo_prod"]),
+        #                 timeout=RAT_TIMEOUT + 10
+        #             )
+        #         except asyncio.TimeoutError:
+        #             rat = None
+        #         except Exception:
+        #             rat = None
 
-            # Fallbacks
-            if not rat:
-                s = (p.get("status") or "").upper()
-                if s == "BOM":
-                    rat = "GOOD"
-                elif s == "DOA":
-                    rat = "DOA"
-                elif s == "RUIM":
-                    rat = ""
-                else:
-                    rat = "-"
+        #     # Fallbacks
+        #     if not rat:
+        #         s = (p.get("status") or "").upper()
+        #         if s == "BOM":
+        #             rat = "GOOD"
+        #         elif s == "DOA":
+        #             rat = "DOA"
+        #         elif s == "RUIM":
+        #             rat = ""
+        #         else:
+        #             rat = "-"
 
-            p["rat"] = rat
-            _rat_cache[key] = rat
+        #     p["rat"] = rat
+        #     _rat_cache[key] = rat
+        
+        # RAT paralelo (limitado)
+        await _resolve_rats_concurrent(produtos, timeout_s=RAT_TIMEOUT + 10, cache=_rat_cache)
 
         out_pdf = storage.output_pdf_path(qlid)
         # injeta a data escolhida no nome do PDF
@@ -1406,7 +1452,9 @@ def main():
     app.add_handler(MessageHandler(filters.ANIMATION, bloquear_anexo))
 
     # app.run_polling()
-    app.run_polling(allowed_updates=Update.ALL_TYPES)  # evita warning de tipos não tratados
+    # app.run_polling(allowed_updates=Update.ALL_TYPES)  # evita warning de tipos não tratados
+    app.run_polling(allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
+
 
 if __name__ == "__main__":
     main()
