@@ -190,7 +190,7 @@ def _stats_text(st: dict) -> str:
     s = st.setdefault("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "📊 **Status do lote**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
     # Data/Volumes (mostra só se já tiverem sido definidos)
     data_iso = st.get("data")
@@ -278,7 +278,7 @@ def _panel_finalize_text(st: dict) -> str:
     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "✅ **Lote finalizado**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | ♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
     data_iso = st.get("data")
     vols = st.get("volumes")
@@ -812,7 +812,7 @@ async def on_print_labels(update, context):
             total = 0
             copias_mult = max(1, int(os.getenv("LABEL_COPIES_PER_QTY", "1")))
             for it in itens:
-                q = it.get("qtde", it.get("quantidade", 1))
+                q = it.get("qtde", it.get("qtde", 1))
                 copias = max(1, int(q)) * copias_mult
                 for _ in range(copias):
                     etiqueta.imprimir_etiqueta(
@@ -1324,7 +1324,7 @@ async def processar_lote(cq, context, st, volumes: int):
                         "ocorrencia": p.get("ocorrencia") or "",
                         "codigo_produto": p.get("codigo_prod") or "",
                         "status": status_norm,
-                        "quantidade": int(float(p.get("qtde", 1) or 1)),
+                        "qtde": int(float(p.get("qtde", 1) or 1)),
                     })
 
                 LABEL_QUEUE[cq.from_user.id] = itens

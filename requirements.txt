@@ -31,3 +31,4 @@ pillow
 selenium
 python-telegram-bot[job-queue]
 sdnotify
+reportlab
