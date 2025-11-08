@@ -30,7 +30,12 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, ADMIN_TELEGRAM_ID
+from config import (
+    BOT_TOKEN,
+    ADMIN_TELEGRAM_ID,
+)
+import os
+
 from services import storage, danfe_parser
 # from services.excel_filler_spire import preencher_e_exportar_lote
 from services.excel_filler_uno import preencher_e_exportar_lote
@@ -45,6 +50,10 @@ from telegram import InputMediaPhoto
 
 from datetime import datetime as _dt
 import re as _re, os as _os
+
+from services import transportadora_db
+from services.storage import user_set_transportadora_padrao
+from telegram.ext import MessageHandler, filters
 
 # =========================================
 # LOGGING BÁSICO (vai pro journal)
@@ -135,6 +144,55 @@ def _fmt_br_date(v: str | None) -> str:
         return _dt.strptime(v, "%Y-%m-%d").strftime("%d/%m/%Y")
     except Exception:
         return v  # se vier em outro formato, devolve como está
+
+def _escolher_transportadora_para_lote(header: dict, user_cfg: dict) -> tuple[str | None, list[str], bool]:
+    """
+    Retorna:
+      (escolhida, opcoes_detectadas, precisa_confirmar)
+
+    - Não faz pergunta, só sugere.
+    - A lógica fina de "como perguntar" fica em processar_lote.
+    """
+    opcoes = header.get("_transportadoras_lote") or []
+    opcoes = [o.strip() for o in opcoes if o and o.strip()]
+    uniq: list[str] = []
+    for o in opcoes:
+        if o not in uniq:
+            uniq.append(o)
+
+    atual_nf = (header.get("transportador") or "").strip()
+    padrao = (user_cfg.get("transportadora_padrao") or "").strip()
+
+    # sem padrão do usuário
+    if not padrao:
+        if uniq:
+            # sugere primeira e pede confirmação
+            return uniq[0], uniq, True
+        return (atual_nf or None), [], False
+
+    # com padrão
+
+    # nenhuma nas NFs -> usa padrão
+    if not uniq:
+        return padrao, [], False
+
+    # se todas as encontradas batem com o padrão -> ok
+    if all(t.upper() == padrao.upper() for t in uniq):
+        return padrao, uniq, False
+
+    # caso clássico: só 1 encontrada, diferente do padrão -> suspeito (NF emprestada)
+    if len(uniq) == 1 and uniq[0].upper() != padrao.upper():
+        # sugere uso do padrão, mas marca para confirmar (UI decide)
+        return padrao, uniq, True
+
+    # múltiplas diferentes, mas se padrão está entre elas -> usa padrão, OK
+    for t in uniq:
+        if t.upper() == padrao.upper():
+            return padrao, uniq, False
+
+    # múltiplas todas diferentes -> sugere padrão, mas pede confirmação
+    return padrao, uniq, True
+
 
 SESS = {}
 RAT_TIMEOUT = int(os.getenv("RAT_FLOW_TIMEOUT", "90"))
@@ -266,13 +324,6 @@ async def reset_lote(uid: int, chat_id: int, context, st: dict | None = None, ha
     st["sid"] = ""
     st["volbuf"] = ""
     st["data"] = ""
-
-# def _panel_finalize_text(st: dict) -> str:
-#     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
-#     return (
-#         "✅ **Lote finalizado**\n"
-#         f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} | \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}"
-#     )
 
 def _panel_finalize_text(st: dict) -> str:
     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
@@ -429,6 +480,65 @@ async def orientar_envio_pdf(context, chat_id):
         ),
     )
 
+
+async def handle_tp_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quando o usuário está em modo waiting_tp_manual, interpreta a mensagem como nome da transportadora."""
+    if not update.message:
+        return
+
+    uid = update.effective_user.id
+    st = SESS.setdefault(uid, {})
+
+    if not st.get("waiting_tp_manual"):
+        # não estamos nesse fluxo -> deixa outros handlers cuidarem (ou ignora)
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        await step_replace(context, update.effective_chat.id, st,
+                           "Por favor, envie o nome da transportadora em texto.")
+        return
+
+    sid = st.get("pending_tp_sid")
+    volumes = st.get("pending_tp_volumes") or 1
+    if not sid:
+        # perdeu o lote
+        st["waiting_tp_manual"] = False
+        await step_replace(context, update.effective_chat.id, st,
+                           "Esse lote não está mais ativo. Envie as DANFEs novamente.")
+        return
+
+    # tenta normalizar com base no banco
+    nome = (transportadora_db.best_match(text) or text).strip().upper()
+    if not nome:
+        await step_replace(context, update.effective_chat.id, st,
+                           "Nome inválido. Tente novamente com o nome da transportadora.")
+        return
+
+    # salva como padrão do usuário
+    user_set_transportadora_padrao(uid, nome)
+    transportadora_db.add(nome)
+
+    # fixa para este lote e libera para continuar
+    st["transportadora_escolhida"] = nome
+    st["waiting_tp_manual"] = False
+    st["waiting_tp_choice"] = False
+    st.pop("pending_tp_scenario", None)
+
+    await step_replace(
+        context,
+        update.effective_chat.id,
+        st,
+        f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
+        "Gerando a minuta com esta transportadora.",
+    )
+
+    # reaproveita o lote pendente
+    # usamos o mesmo esquema do finalize_minuta: _CQUpdateShim
+    shim = _CQUpdateShim(update)
+    await processar_lote(shim, context, st, volumes)
+
+
 # ========== START ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -466,26 +576,70 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base["cidade"] = rec.get("cidade", "")
         base["msg_recebimento_id"] = msg_id
         base["blocked"] = rec.get("blocked", False)
-        SESS[u.id] = base
-        # await context.bot.send_message(
-        #     chat_id=update.effective_chat.id,
-        #     text=f"👋 Bem-vindo, {u.first_name}!\n\n📎 Envie suas DANFEs em PDF para começar.",
-        #     reply_markup=None
-        # )
-        # boas-vindas personalizadas (some sozinha)
-        first = (update.effective_user.first_name or "").strip() or "bem-vindo"
+
+        # preserva flags existentes na sessão (ex: start_shown)
+        prev = SESS.get(u.id, {})
+        prev.update(base)
+        SESS[u.id] = prev
+
+        first = (u.first_name or "").strip() or "bem-vindo"
         await send_temp(
             context,
             chat_id,
             f"👋 Bem-vindo, {first}!\n\n📎 Envie suas DANFEs em PDF para começar.",
             seconds=20,
         )
+
     else:
-        SESS[u.id] = base
+        # usuário novo: marca que já mostramos o onboarding
+        base["start_shown"] = True
+
+        prev = SESS.get(u.id, {})
+        prev.update(base)
+        SESS[u.id] = prev
+
         await update.message.reply_text(
             f"Olá, {u.first_name}! Vamos configurar seu acesso.",
             reply_markup=kb_cadastro(),
         )
+
+
+async def cmd_set_transportadora(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    args = context.args or []
+
+    if not args:
+        await update.message.reply_text(
+            "Uso: /settransportadora NOME_DA_TRANSPORTADORA\n\n"
+            "Exemplo:\n"
+            "/settransportadora MINHA TRANSPORTADORA LTDA"
+        )
+        return
+
+    nome_raw = " ".join(args).strip()
+    # tenta casar com o banco de nomes extraídos das DANFEs
+    sugerido = transportadora_db.best_match(nome_raw)
+    nome = (sugerido or nome_raw).strip().upper()
+
+    if not nome:
+        await update.message.reply_text("Informe um nome válido de transportadora.")
+        return
+
+    ok = storage.user_set_transportadora_padrao(tg_id, nome)
+    if not ok:
+        await update.message.reply_text(
+            "Não encontrei seu cadastro (QLID). "
+            "Cadastre primeiro pelo menu /start ou botão de cadastro."
+        )
+        return
+
+    # garante que esse nome também está no DB global
+    transportadora_db.add(nome)
+
+    await update.message.reply_text(
+        f"Transportadora padrão atualizada para:\n<b>{nome}</b>",
+        parse_mode="HTML",
+    )
 
 # ========== OUTROS COMANDOS ==========
 async def cmd_minutas(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -583,18 +737,88 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
     text = msg.text.strip()
 
+    # --- aguardando transportadora digitada manualmente ---
+    chat_id = update.effective_chat.id
+    if st.get("waiting_tp_manual"):
+        from services import transportadora_db
+        from services.storage import user_set_transportadora_padrao
+
+        nome_raw = text
+        if not nome_raw:
+            return
+
+        sugerido = transportadora_db.best_match(nome_raw)
+        nome = (sugerido or nome_raw).strip().upper()
+
+        if not nome:
+            warn = await msg.reply_text("Nome inválido. Digite novamente o nome completo da sua transportadora:")
+            st["step_msg_id"] = warn.message_id
+            return
+
+        transportadora_db.add(nome)
+        user_set_transportadora_padrao(uid, nome)
+
+        st["transportadora_escolhida"] = nome
+        st["waiting_tp_manual"] = False
+        st.pop("waiting_tp_choice", None)
+
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        await step_replace(
+            context,
+            chat_id,
+            st,
+            f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
+            "Gerando a minuta com esta transportadora."
+        )
+
+        sid = st.get("pending_tp_sid")
+        volumes = st.get("pending_tp_volumes") or 1
+        if sid:
+            class _MsgShim:
+                def __init__(self, m):
+                    self.message = m
+                    self.from_user = m.from_user
+            shim = _MsgShim(msg)
+            await processar_lote(shim, context, st, volumes)
+
+        return
+    
+    # --- aguardando QLID ---
     if context.user_data.get("awaiting_qlid"):
         q = text.upper()
+
         if not valida_qlid(q):
             await msg.reply_text("❌ QLID inválido. Use o formato AA999999 e envie novamente.")
             return
+
+        # Verifica se QLID já está em uso
+        try:
+            users = storage.users_get_all()
+        except Exception:
+            users = {}
+
+        existing = users.get(q)
+        if existing and existing.get("telegram_id") and existing["telegram_id"] != uid:
+            await msg.reply_text(
+                "❌ Este QLID já está vinculado a outro usuário.\n"
+                "Confira o código informado ou fale com o responsável pelo sistema."
+            )
+            return
+
+        # Se já existe e é do mesmo usuário, apenas atualiza/sincroniza.
         st["qlid"] = q
         storage.users_upsert(q, {"telegram_id": uid, "cidade": st.get("cidade", ""), "blocked": False})
+
         await msg.reply_text("✅ QLID cadastrado.")
         context.user_data["awaiting_qlid"] = False
         context.user_data["awaiting_cidade"] = True
         await msg.reply_text("🏙️ Agora informe a Cidade para preencher na minuta.")
         return
+
 
     if context.user_data.get("awaiting_cidade"):
         c = text
@@ -635,6 +859,35 @@ def _chave44_from_pdf(path: str) -> str | None:
             return apenas_dig[:44]
     return None
 
+def _nf_from_chave(chave: str) -> int:
+    """
+    Extrai o número da NF (nNF) a partir da chave de 44 dígitos.
+    Se não conseguir, devolve um valor alto para não bagunçar a ordenação.
+    """
+    try:
+        if chave and len(chave) == 44:
+            # cUF(2) + AAMM(4) + CNPJ(14) + mod(2) + série(3) = 25
+            # nNF = próximos 9 dígitos -> posições 26–34 (1-based) => 25:34 (0-based)
+            return int(chave[25:34])
+    except Exception:
+        pass
+    return 999999999
+
+
+def _ordenar_danfes_por_nf(danfe_paths):
+    """
+    Ordena a lista de PDFs de DANFE pelo número da nota (NF) ascendente,
+    usando a chave 44 encontrada em cada PDF.
+    """
+    ordenado = []
+    for p in danfe_paths:
+        ch = _chave44_from_pdf(p)
+        nf = _nf_from_chave(ch) if ch else 999999999
+        ordenado.append((nf, p))
+    ordenado.sort(key=lambda t: (t[0], t[1]))
+    return [p for _, p in ordenado]
+
+
 # ========== ANEXOS ==========
 async def bloquear_anexo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -648,12 +901,14 @@ async def bloquear_anexo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     u = msg.from_user
+    uid = u.id
     st = SESS.setdefault(
-        u.id,
+        uid,
         {
             "qlid": "", "cidade": "", "blocked": False, "sid": "", "volbuf": "", "data": "",
             "danfe_keys": set(), "danfe_hashes": set(), "stats": {"recv": 0, "ok": 0, "dup": 0, "bad": 0},
-            "panel_msg_id": None
+            "panel_msg_id": None,
+            "start_shown": False,
         }
     )
     await limpar_mensagens_antigas(st, context, update.effective_chat.id)
@@ -662,12 +917,47 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
         return
 
-    if not st["qlid"] or not st["cidade"]:
-        if not st.get("warned_incomplete"):
-            await send_temp(context, msg.chat.id, "⚠️ Finalize o cadastro primeiro.", seconds=6)
-            st["warned_incomplete"] = True
-        await msg.delete()
-        return
+    # Se sessão ainda não tem QLID/cidade, tenta carregar do cadastro persistente.
+    if not st.get("qlid") or not st.get("cidade"):
+        try:
+            qlid, rec = storage.users_find_by_tg(uid)
+        except Exception:
+            qlid, rec = None, None
+
+        if qlid and rec:
+            # Já existe vínculo no users.json
+            st["qlid"] = qlid
+            st["cidade"] = rec.get("cidade", "")
+
+            if not st["cidade"]:
+                # Tem QLID mas NÃO tem cidade -> cadastro incompleto.
+                # Não pode aceitar DANFE ainda: descarta este PDF e reforça.
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+
+                await step_replace(
+                    context,
+                    msg.chat.id,
+                    st,
+                    "🏙️ Agora informe a Cidade para preencher na minuta."
+                )
+                return
+
+            # Se chegou aqui: QLID + cidade OK -> segue o fluxo normalmente
+        else:
+            # Não tem QLID mesmo -> dispara /start uma única vez, as demais DANFEs só são descartadas.
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            if not st.get("start_shown"):
+                await start(update, context)
+                st["start_shown"] = True
+
+            return
 
     doc = msg.document
     if not doc.file_name.lower().endswith(".pdf"):
@@ -853,43 +1143,69 @@ async def on_skip_labels(update, context):
 
 # —— callback de impressão da MINUTA ——
 async def on_print_minuta_cb(update, context):
-    """Trata clique nos botões 'Imprimir minuta' / 'Não imprimir' e apaga a mensagem de botões."""
+    """Trata clique nos botões de impressão de minuta (sem/com DANFEs)."""
     try:
         cq = update.callback_query
         await cq.answer()
-        choice = cq.data.split(":")[1]  # yes | no
-        pdf_path = context.user_data.get("last_minuta_pdf")
-        msg_txt = "Minuta: opção não reconhecida."
-        if choice == "yes":
+
+        data = cq.data or ""
+        parts = data.split(":")
+        kind = parts[0] if len(parts) > 0 else ""
+        choice = parts[1] if len(parts) > 1 else ""
+
+        # mapeia o tipo de botão para a chave correta em user_data
+        if kind == "print_minuta_sem":
+            key = "last_minuta_pdf_sem"
+        elif kind == "print_minuta_com":
+            key = "last_minuta_pdf_com"
+        else:
+            # compatibilidade com callback antigo "print_minuta:yes/no"
+            key = "last_minuta_pdf"
+
+        pdf_path = context.user_data.get(key) or context.user_data.get("last_minuta_pdf")
+        msg_txt = ""
+
+        if choice == "no":
+            # só fecha os botões, sem imprimir
+            msg_txt = ""
+        elif choice == "yes":
             if pdf_path:
                 try:
                     from services.print_integration import _lp_print, PRINT_ENABLE, is_admin
+
+                    if PRINT_ENABLE and is_admin(cq):
+                        _lp_print(pdf_path)
+                        msg_txt = "🖨️ Minuta enviada para impressão."
+                    else:
+                        msg_txt = "⚠️ Impressão não está habilitada ou você não é admin."
                 except Exception:
-                    from services.print_integration import _lp_print, PRINT_ENABLE, is_admin
-                if PRINT_ENABLE and is_admin(update):
-                    ok, m = _lp_print(str(pdf_path))
-                    msg_txt = "🖨️ Minuta enviada para impressão." if ok else f"❌ Falha ao imprimir a minuta: {m}"
-                else:
-                    msg_txt = "🖨️ Minuta enviada para impressão."
+                    msg_txt = "⚠️ Falha ao enviar a minuta para impressão."
             else:
-                msg_txt = "🖨️ Minuta enviada para impressão."
-        elif choice == "no":
-            # msg_txt = "✅ Ok, não vou imprimir minuta."
-            pass
+                msg_txt = "⚠️ Não encontrei o PDF da minuta para impressão."
+
+        # apaga a mensagem com os botões
         try:
             await cq.message.delete()
         except Exception:
             pass
-        # await send_temp(context, cq.message.chat.id, msg_txt, seconds=8)
+
+        # responde algo opcional se tiver msg
+        if msg_txt:
+            try:
+                await send_temp(context, cq.message.chat.id, msg_txt, seconds=8)
+            except Exception:
+                pass
+
+        # marca como decidido e tenta limpar lote
         st = SESS.setdefault(cq.from_user.id, {})
         st["minuta_decidida"] = True
         await _maybe_cleanup_lote(context, cq.message.chat.id, cq.from_user.id, st)
 
-    except Exception as e:
-        try:
-            await send_temp(context, update.effective_chat.id, f"Erro no callback de impressão da minuta: {e}", seconds=8)
-        except Exception:
-            pass
+    except Exception:
+        # não deixa erro de callback quebrar o bot
+        import traceback
+        traceback.print_exc()
+
 
 # ===== MAIN =====
     
@@ -1023,73 +1339,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_datas()
             )
         return
-
-    # # ----- Data escolhida -----
-    # if cq.data.startswith("data_"):
-    #     raw_data = cq.data[5:]
-    #     try:
-    #         data_formatada = datetime.strptime(raw_data, "%Y-%m-%d").strftime("%d/%m/%Y")
-    #     except:
-    #         data_formatada = raw_data  # fallback
-
-    #     st["data"] = raw_data
-    #     st["volbuf"] = ""
-    #     try:
-    #         await cq.message.edit_text(
-    #             f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
-    #             reply_markup=kb_volumes()
-    #         )
-    #     except BadRequest:
-    #         await context.bot.send_message(
-    #             chat_id=update.effective_chat.id,
-    #             text=f"📅 Data escolhida: {data_formatada}\nAgora informe os volumes:",
-    #             reply_markup=kb_volumes()
-    #         )
-    #     return
-
-    # # ----- Teclado de volumes -----
-    # if cq.data.startswith("vol_"):
-    #     # Formata a data salva para exibir
-    #     try:
-    #         data_formatada = datetime.strptime(st["data"], "%Y-%m-%d").strftime("%d/%m/%Y")
-    #     except:
-    #         data_formatada = st["data"]
-
-    #     if cq.data == "vol_del":
-    #         st["volbuf"] = st.get("volbuf", "")[:-1]
-    #     elif cq.data == "vol_ok":
-    #         vol = st.get("volbuf", "0")
-    #         if not vol or vol == "0":
-    #             try:
-    #                 await cq.message.edit_text(
-    #                     f"📅 Data escolhida: {data_formatada}\nVolumes deve ser inteiro > 0.",
-    #                     reply_markup=kb_volumes(st["volbuf"])
-    #                 )
-    #             except BadRequest:
-    #                 await context.bot.send_message(
-    #                     chat_id=update.effective_chat.id,
-    #                     text=f"📅 Data escolhida: {data_formatada}\n📦 Volumes deve ser inteiro > 0.",
-    #                     reply_markup=kb_volumes(st["volbuf"])
-    #                 )
-    #             return
-    #         await cq.message.edit_reply_markup(reply_markup=None)
-    #         await processar_lote(cq, context, st, int(vol))
-    #         return
-    #     else:
-    #         st["volbuf"] = (st.get("volbuf", "") + cq.data.split("_")[1])[:4]
-
-    #     try:
-    #         await cq.message.edit_text(
-    #             f"📅 Data escolhida: {data_formatada}\n📦 Volumes: {st['volbuf'] or '-'}",
-    #             reply_markup=kb_volumes(st["volbuf"])
-    #         )
-    #     except BadRequest:
-    #         await context.bot.send_message(
-    #             chat_id=update.effective_chat.id,
-    #             text=f"📅 Data escolhida: {data_formatada}\n📦 Volumes: {st['volbuf'] or '-'}",
-    #             reply_markup=kb_volumes(st["volbuf"])
-    #         )
-    #     return
     
     # ----- Data escolhida -----
     if cq.data.startswith("data_"):
@@ -1181,7 +1430,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-
 # ===== PROCESSAR LOTE =====
 async def processar_lote(cq, context, st, volumes: int):
     import traceback, os
@@ -1191,6 +1439,7 @@ async def processar_lote(cq, context, st, volumes: int):
     if not isinstance(st, dict):
         st = SESS.setdefault(uid, {})
 
+    st.setdefault("waiting_tp_choice", False)
     chat_id = cq.message.chat.id
     qlid = st.get("qlid")
     sid = st.get("sid")
@@ -1206,10 +1455,141 @@ async def processar_lote(cq, context, st, volumes: int):
         return
 
     try:
-        # await cq.message.reply_text(f"🧐 Lendo {len(pdfs)} DANFEs…")
         await step_replace(context, chat_id, st, f"🤔 Lendo {len(pdfs)} DANFEs...")
+        
+        # 1) Lê DANFEs e alimenta o banco global de transportadoras
         header, produtos = danfe_parser.parse_lote(pdfs)
-        # await cq.message.reply_text("🔍 Fazendo a busca do RAT… isso pode levar alguns minutos.")
+
+        # 2) Carrega config do usuário
+        user_cfg = storage.user_get_config_by_tg(uid)
+
+        # 3) Normaliza a transportadora padrão do usuário com base no banco global,
+        #    garantindo que o nome completo seja usado já nesta minuta.
+        from services import transportadora_db
+        padrao = (user_cfg.get("transportadora_padrao") or "").strip()
+        if padrao:
+            sugerido = transportadora_db.best_match(padrao)
+            if sugerido:
+                sugerido = sugerido.strip().upper()
+                if sugerido != padrao.upper():
+                    from services.storage import user_set_transportadora_padrao
+                    user_set_transportadora_padrao(uid, sugerido)
+                    user_cfg["transportadora_padrao"] = sugerido
+                    padrao = sugerido
+
+        # 4) Decide a transportadora do lote já com padrão normalizado
+        escolhida, opcoes, precisa_confirmar = _escolher_transportadora_para_lote(header, user_cfg)
+
+        if escolhida:
+            header["transportador"] = escolhida
+
+        # se veio de uma confirmação anterior, respeita e não pergunta de novo
+        fixed_tp = st.get("transportadora_escolhida")
+        if fixed_tp:
+            escolhida = fixed_tp
+            opcoes = header.get("_transportadoras_lote") or []
+            precisa_confirmar = False
+            header["transportador"] = fixed_tp
+        else:
+            escolhida, opcoes, precisa_confirmar = _escolher_transportadora_para_lote(header, user_cfg)
+            if escolhida:
+                header["transportador"] = escolhida
+
+        logging.info(
+            "[minutron] uid=%s transportadoras_lote=%s padrao_user=%s escolhida=%s precisa_confirmar=%s",
+            uid,
+            opcoes,
+            user_cfg.get("transportadora_padrao"),
+            escolhida,
+            precisa_confirmar,
+        )
+
+        if precisa_confirmar:
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            # limpa a box "Lendo DANFEs..." antes de mostrar a pergunta
+            try:
+                await step_clear(context, chat_id, st)
+            except Exception:
+                pass
+
+            padrao = (user_cfg.get("transportadora_padrao") or "").strip()
+            uniq = opcoes or []
+
+            st["waiting_tp_choice"] = True
+            st["pending_tp_sid"] = sid
+            st["pending_tp_volumes"] = volumes
+
+            # CENÁRIO A: usuário JÁ TEM padrão e só 1 transportadora diferente nas NFs
+            if padrao and len(uniq) == 1 and uniq[0].upper() != padrao.upper():
+                nf_tp = uniq[0]
+                st["pending_tp_scenario"] = "single_diff"
+                st["pending_tp_nf"] = nf_tp
+
+                botoes = [
+                    [InlineKeyboardButton(
+                        f"Usar padrão: {padrao}",
+                        callback_data="tp_use_default"
+                    )],
+                    [InlineKeyboardButton(
+                        f"Usar da NF: {nf_tp}",
+                        callback_data="tp_use_nf"
+                    )],
+                ]
+
+                texto = (
+                    "🚚 A transportadora desta NF é diferente da sua padrão.\n\n"
+                    f"NF: <b>{nf_tp}</b>\n"
+                    f"Sua padrão: <b>{padrao}</b>\n\n"
+                    "Qual deseja usar para esta minuta?"
+                )
+
+                await cq.message.reply_text(
+                    texto,
+                    reply_markup=InlineKeyboardMarkup(botoes),
+                    parse_mode="HTML",
+                )
+                return
+
+            # CENÁRIO B: ainda não tem padrão → escolher e já salvar
+            st["pending_tp_scenario"] = "choose_padrao"
+            st["pending_tp_opcoes"] = uniq
+            st["pending_tp_escolhida"] = escolhida
+
+            botoes = []
+
+            for idx, nome in enumerate(uniq):
+                botoes.append([
+                    InlineKeyboardButton(
+                        nome,
+                        callback_data=f"set_tp_{idx}"
+                    )
+                ])
+
+            # botão "outra" vai abrir lista do DB ou pedir nome novo
+            botoes.append([
+                InlineKeyboardButton(
+                    "Outra transportadora...",
+                    callback_data="set_tp_other"
+                )
+            ])
+
+            texto = (
+                "🚚 Encontrei transportadora(s) nas NFs.\n"
+                "Escolha qual é a SUA transportadora padrão.\n"
+                "Ela será usada nesta minuta e nas próximas."
+            )
+
+            m = await cq.message.reply_text(
+                texto,
+                reply_markup=InlineKeyboardMarkup(botoes),
+                parse_mode="Markdown",
+            )
+
+            # registra como "mensagem de etapa" para ser removida depois
+            st["step_msg_id"] = m.message_id
+            return
+
         await step_replace(context, chat_id, st, "🔍 Fazendo a busca do RAT... isso pode levar alguns minutos.")
         for p in produtos:
             # Se não tem ocorrência, define como "-"
@@ -1265,23 +1645,119 @@ async def processar_lote(cq, context, st, volumes: int):
             # base, ext = _os.path.splitext(out_pdf)
             out_pdf = f"{base}_{data_tag}{ext}"
     
-        # await cq.message.reply_text("🧾 Preenchendo a minuta e gerando PDF…")
-        await step_replace(context, chat_id, st, "🧾 Preenchendo a minuta e gerando PDF...")
-        await asyncio.to_thread(preencher_e_exportar_lote, qlid, st.get("cidade"), header, produtos, st.get("data"), volumes, out_pdf)
+        # await step_replace(context, chat_id, st, "🧾 Preenchendo a minuta e gerando PDF...")
+        # await asyncio.to_thread(preencher_e_exportar_lote, qlid, st.get("cidade"), header, produtos, st.get("data"), volumes, out_pdf)
     
-        # preview das 1–2 primeiras páginas da MINUTA (sem DANFEs)
-        await _send_minuta_preview(context, chat_id, out_pdf, pages=(0,1))
+        # # preview das 1–2 primeiras páginas da MINUTA (sem DANFEs)
+        # await _send_minuta_preview(context, chat_id, out_pdf, pages=(0,1))
 
-        # === NOVO: envia (e imprime se habilitado) usando a integração ===
-        # Passamos também a lista de DANFEs para, se configurado, juntar no final.
-        shim = _CQUpdateShim(cq)
-        await finalize_minuta_and_print(
-            shim,
-            context,
-            minuta_pdf_path=out_pdf,
-            danfe_paths=pdfs,
+        # # === NOVO: envia (e imprime se habilitado) usando a integração ===
+        # # Passamos também a lista de DANFEs para, se configurado, juntar no final.
+        # shim = _CQUpdateShim(cq)
+        # await finalize_minuta_and_print(
+        #     shim,
+        #     context,
+        #     minuta_pdf_path=out_pdf,
+        #     danfe_paths=pdfs,
+        # )
+
+        await step_replace(context, chat_id, st, "🧾 Preenchendo a minuta e gerando PDF...")
+        await asyncio.to_thread(
+            preencher_e_exportar_lote,
+            qlid,
+            st.get("cidade"),
+            header,
+            produtos,
+            st.get("data"),
+            volumes,
+            out_pdf,
         )
+
+        # preview das 1–2 primeiras páginas da MINUTA (sem DANFEs)
+        await _send_minuta_preview(context, chat_id, out_pdf, pages=(0, 1))
+
+        # === Disponibiliza MINUTA SEM DANFEs (download para todos) ===
+        try:
+            doc_msg = await context.bot.send_document(
+                chat_id=chat_id,
+                document=open(out_pdf, "rb"),
+                filename=os.path.basename(out_pdf),
+                caption="🧾 Minuta gerada (sem DANFEs anexadas).",
+            )
+            # guarda para possíveis ações de impressão
+            context.user_data["last_minuta_pdf_sem"] = out_pdf
+            st.setdefault("cleanup_ids", []).append(doc_msg.message_id)
+        except Exception:
+            pass
+
+        # === Ordena DANFEs por NF para o PDF final com anexos ===
+        danfes_ordenadas = _ordenar_danfes_por_nf(pdfs)
+
+        # === Gera/enfileira MINUTA COM DANFEs anexadas via integração existente ===
+        shim = _CQUpdateShim(cq)
+        merged_path = None
+        try:
+            # se finalize_minuta_and_print passar a devolver caminho, aproveitamos; senão, ignora
+            maybe = await finalize_minuta_and_print(
+                shim,
+                context,
+                minuta_pdf_path=out_pdf,
+                danfe_paths=danfes_ordenadas,
+            )
+            if isinstance(maybe, str):
+                merged_path = maybe
+        except Exception:
+            merged_path = None
+
+        if merged_path:
+            context.user_data["last_minuta_pdf_com"] = merged_path
+        else:
+            # fallback para compatibilidade: se integração não retorna caminho,
+            # ainda podemos usar a minuta sem anexos como base
+            context.user_data.setdefault("last_minuta_pdf_com", out_pdf)
         
+        # === Botões de impressão separados (apenas admin) ===
+        try:
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            if is_admin(shim):
+                rows = []
+
+                if context.user_data.get("last_minuta_pdf_sem"):
+                    rows.append([
+                        InlineKeyboardButton(
+                            "🖨️ Imprimir MINUTA (sem DANFEs)",
+                            callback_data="print_minuta_sem:yes",
+                        )
+                    ])
+
+                if context.user_data.get("last_minuta_pdf_com"):
+                    rows.append([
+                        InlineKeyboardButton(
+                            "🖨️ Imprimir MINUTA (com DANFEs)",
+                            callback_data="print_minuta_com:yes",
+                        )
+                    ])
+
+                if rows:
+                    # botão de não imprimir opcional para fechar o fluxo
+                    rows.append([
+                        InlineKeyboardButton(
+                            "❌ Não imprimir MINUTA",
+                            callback_data="print_minuta_sem:no",
+                        )
+                    ])
+
+                    m = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Escolha o que deseja imprimir:",
+                        reply_markup=InlineKeyboardMarkup(rows),
+                    )
+                    st.setdefault("cleanup_ids", []).append(m.message_id)
+        except Exception:
+            # nunca quebrar o fluxo por causa de botão de impressão
+            pass
+
         # === depois de enviar a minuta (lote) ===
         st["minuta_entregue"] = True
 
@@ -1329,12 +1805,13 @@ async def processar_lote(cq, context, st, volumes: int):
 
                 LABEL_QUEUE[cq.from_user.id] = itens
                 await cq.message.reply_text(
-                    "🖨️ Deseja imprimir as etiquetas deste lote?",
+                    "🖨️ Deseja imprimir etiqueta?",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🖨️ Imprimir etiqueta", callback_data="print_labels"),
-                        InlineKeyboardButton("❌ Não imprimir",    callback_data="skip_labels")]
-                    ])
+                        [InlineKeyboardButton("🖨️ Imprimir ETIQUETA", callback_data="print_labels")],
+                        [InlineKeyboardButton("❌ Não imprimir ETIQUETA", callback_data="skip_labels")],
+                    ]),
                 )
+
 
         except Exception:
             # nunca derruba o fluxo por causa de etiqueta
@@ -1344,12 +1821,18 @@ async def processar_lote(cq, context, st, volumes: int):
         await cq.message.reply_text(f"Ocorreu um erro ao gerar a minuta. Detalhes: {e}")
         traceback.print_exc()
     finally:
+        # se ainda estamos aguardando escolha ou digitação da transportadora,
+        # não limpamos nem finalizamos o lote ainda.
+        if st.get("waiting_tp_choice") or st.get("waiting_tp_manual"):
+            return
+
+        # fluxo concluído: pode limpar a última mensagem de etapa
         try:
             await step_clear(context, chat_id, st)
         except Exception:
             pass
 
-        # Limpeza segura
+        # Daqui pra baixo é só quando o lote acabou mesmo
         try:
             if sid:
                 storage.finalize_session(qlid, sid)
@@ -1357,11 +1840,242 @@ async def processar_lote(cq, context, st, volumes: int):
             pass
 
         sess = SESS.setdefault(uid, {})
-        # for k in ("sid", "volbuf", "data"):
+
         for k in ("sid", "volbuf"):
             sess[k] = ""
-        for k in ("progress_msg_id","progress_sid","progress_text","cleanup_ids","last_danfe_count","warned_incomplete"):
+
+        for k in (
+            "progress_msg_id",
+            "progress_sid",
+            "progress_text",
+            "cleanup_ids",
+            "last_danfe_count",
+            "warned_incomplete",
+            "transportadora_escolhida",
+            "pending_tp_opcoes",
+            "pending_tp_escolhida",
+            "pending_tp_sid",
+            "pending_tp_volumes",
+            "pending_tp_scenario",
+            "pending_tp_nf",
+            "waiting_tp_choice",
+            "waiting_tp_manual",
+        ):
             sess.pop(k, None)
+
+
+
+async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # from services.storage import user_set_transportadora_padrao
+    cq = update.callback_query
+    await cq.answer()
+
+    uid = cq.from_user.id
+    chat_id = cq.message.chat.id
+    st = SESS.setdefault(uid, {})
+
+    data = cq.data or ""
+    sid = st.get("pending_tp_sid")
+    if not sid:
+        await cq.message.edit_text("Esse lote não está mais ativo. Envie as DANFEs novamente.")
+        return
+
+    volumes = st.get("pending_tp_volumes") or 1
+    scenario = st.get("pending_tp_scenario")
+    opcoes = st.get("pending_tp_opcoes") or []
+    escolhida_sugerida = st.get("pending_tp_escolhida")
+    user_cfg = storage.user_get_config_by_tg(uid)
+    padrao = (user_cfg.get("transportadora_padrao") or "").strip()
+
+    # Normaliza o padrão do usuário usando o banco (se existir versão mais completa)
+    if padrao:
+        # from services import transportadora_db
+        sugerido = transportadora_db.best_match(padrao)
+        if sugerido and sugerido.strip().upper() != padrao.upper():
+            # from services.storage import user_set_transportadora_padrao
+            novo = sugerido.strip().upper()
+            user_set_transportadora_padrao(uid, novo)
+            padrao = novo
+            user_cfg["transportadora_padrao"] = novo
+
+    # ===== CENÁRIO A: padrão já existe x NF diferente =====
+    if scenario == "single_diff":
+        nf_tp = (st.get("pending_tp_nf") or "").strip()
+
+        if data == "tp_use_default" and padrao:
+            nome = padrao
+            st["transportadora_escolhida"] = nome
+            st["waiting_tp_choice"] = False
+
+            for k in ("pending_tp_sid", "pending_tp_volumes", "pending_tp_scenario", "pending_tp_nf"):
+                st.pop(k, None)
+
+            await cq.message.edit_text(
+                f"✅ Usando sua transportadora padrão:\n<b>{nome}</b>",
+                parse_mode="HTML",
+            )
+            st["step_msg_id"] = cq.message.message_id
+
+            await processar_lote(cq, context, st, volumes)
+            return
+
+        if data == "tp_use_nf" and nf_tp:
+            # usa a da NF só neste lote (não muda padrão)
+            nome = nf_tp
+            st["transportadora_escolhida"] = nome
+            st["waiting_tp_choice"] = False
+
+            for k in ("pending_tp_sid", "pending_tp_volumes", "pending_tp_scenario", "pending_tp_nf"):
+                st.pop(k, None)
+
+            await cq.message.edit_text(
+                f"✅ Usando a transportadora da NF apenas nesta minuta:\n<b>{nome}</b>",
+                parse_mode="HTML",
+            )
+            st["step_msg_id"] = cq.message.message_id
+
+            # texto = f"✅ Usando a transportadora da NF apenas nesta minuta:\n<b>{nome}</b>"
+            # try:
+            #     await send_temp(context, cq.message.chat.id, texto, seconds=10, parse_mode="HTML")
+            # except TypeError:
+            #     # se sua send_temp não aceitar parse_mode, manda simples
+            #     await send_temp(context, cq.message.chat.id, texto, seconds=10)
+
+            await processar_lote(cq, context, st, volumes)
+            return
+
+    # ===== CENÁRIO B: escolher e salvar padrão =====
+    if scenario == "choose_padrao":
+        # usuário escolheu uma das opções sugeridas
+        if data.startswith("set_tp_") and data != "set_tp_other":
+            try:
+                idx = int(data.replace("set_tp_", ""))
+                nome = (opcoes[idx] if opcoes else escolhida_sugerida) or ""
+            except Exception:
+                nome = ""
+
+            nome = nome.strip()
+            if not nome:
+                await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+                return
+
+            user_set_transportadora_padrao(uid, nome)
+            transportadora_db.add(nome)
+
+            st["transportadora_escolhida"] = nome
+            st["waiting_tp_choice"] = False
+
+            for k in ("pending_tp_opcoes", "pending_tp_escolhida",
+                      "pending_tp_sid", "pending_tp_volumes",
+                      "pending_tp_scenario"):
+                st.pop(k, None)
+
+            await cq.message.edit_text(
+                f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
+                "Gerando a minuta com esta transportadora.",
+                parse_mode="HTML",
+            )
+            # st["step_msg_id"] = cq.message.message_id
+
+            await processar_lote(cq, context, st, volumes)
+            return
+
+        # botão "Outra transportadora..."
+        if data == "set_tp_other":
+            # from services import transportadora_db as tpdb
+            lista = transportadora_db.all()
+
+            if lista:
+                # primeiro tenta ajudar com as que já conhece
+                st["pending_tp_scenario"] = "choose_padrao_db"
+
+                botoes = []
+                for i, nome in enumerate(lista[:20]):
+                    botoes.append([
+                        InlineKeyboardButton(
+                            nome,
+                            callback_data=f"tpdb_{i}"
+                        )
+                    ])
+                botoes.append([
+                    InlineKeyboardButton(
+                        "Nenhuma destas (digitar nome)",
+                        callback_data="tpdb_manual"
+                    )
+                ])
+
+                await cq.message.edit_text(
+                    "Selecione sua transportadora na lista abaixo ou escolha digitar o nome:",
+                    reply_markup=InlineKeyboardMarkup(botoes),
+                )
+                # st["step_msg_id"] = cq.message.message_id
+                return
+
+            # se não tem nada no DB ainda, já entra direto em modo manual
+            st["waiting_tp_manual"] = True
+            st["waiting_tp_choice"] = False
+            await cq.message.edit_text(
+                "Digite abaixo o nome da sua transportadora padrão:"
+            )
+            st["step_msg_id"] = cq.message.message_id
+            return
+
+
+    # ===== CENÁRIO C: escolher a partir do DB =====
+    if scenario == "choose_padrao_db":
+        # from services import transportadora_db as tpdb
+        lista = transportadora_db.all()
+
+        # clique numa opção da lista
+        if data.startswith("tpdb_") and data != "tpdb_manual":
+            try:
+                idx = int(data.replace("tpdb_", ""))
+                nome = lista[idx]
+            except Exception:
+                nome = ""
+
+            nome = (nome or "").strip()
+            if not nome:
+                await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+                return
+
+            user_set_transportadora_padrao(uid, nome)
+            transportadora_db.add(nome)
+
+            st["transportadora_escolhida"] = nome
+            st["waiting_tp_choice"] = False
+
+            for k in ("pending_tp_opcoes", "pending_tp_escolhida",
+                      "pending_tp_sid", "pending_tp_volumes",
+                      "pending_tp_scenario"):
+                st.pop(k, None)
+
+            await cq.message.edit_text(
+                f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
+                "Gerando a minuta com esta transportadora.",
+                parse_mode="HTML",
+            )
+            await processar_lote(cq, context, st, volumes)
+            return
+
+        # clique em "Nenhuma destas (digitar nome)"
+        if data == "tpdb_manual":
+            # Vamos aceitar o próximo texto como nome manual
+            st["waiting_tp_manual"] = True
+            st["waiting_tp_choice"] = False
+            # mantemos pending_tp_sid / pending_tp_volumes para poder retomar o lote
+            st.pop("pending_tp_scenario", None)
+
+            await cq.message.edit_text(
+                "Digite abaixo o nome da sua transportadora padrão:"
+            )
+            st["step_msg_id"] = cq.message.message_id
+            return
+
+    # fallback
+    await cq.message.edit_text("Fluxo inválido ou expirado. Envie as DANFEs novamente.")
+    # st["step_msg_id"] = cq.message.message_id
+
 
 # ===== MAIN =====
 def main():
@@ -1374,7 +2088,8 @@ def main():
     # Comandos
     app.add_handler(CommandHandler("start", start))
     # app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(on_print_minuta_cb, pattern=r"^printminuta:(yes|no)$"))
+    # app.add_handler(CallbackQueryHandler(on_print_minuta_cb, pattern=r"^printminuta:(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(on_print_minuta_cb, pattern=r"^print_minuta"))
     app.add_handler(CommandHandler("minutas", cmd_minutas))
     app.add_handler(CommandHandler("alterar", cmd_alterar_cidade))
     app.add_handler(CommandHandler("cancelar", cmd_cancelar))
@@ -1382,6 +2097,11 @@ def main():
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("settransportadora", cmd_set_transportadora))
+    app.add_handler(CallbackQueryHandler(
+        cb_escolher_transportadora,
+        pattern=r"^(set_tp_|tp_use_|tpdb_)"
+    ))
 
     # NOVO: comandos utilitários
     app.add_handler(CommandHandler("meuid", meuid_cmd))
@@ -1397,6 +2117,8 @@ def main():
     # Mensagens
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tp_manual))
+
 
     # Bloqueio de mídia não-PDF
     app.add_handler(MessageHandler(filters.PHOTO, bloquear_anexo))

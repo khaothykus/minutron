@@ -67,3 +67,31 @@ def list_minutas(qlid: str):
     if not os.path.isdir(d): return []
     files = [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(".pdf")]
     return sorted(files, key=os.path.getmtime, reverse=True)
+
+def user_set_transportadora_padrao(tg_id: int, nome: str) -> bool:
+    """
+    Define/atualiza a transportadora padrão do usuário (via telegram_id).
+    Retorna True se salvou, False se não achou usuário.
+    """
+    data = _load_users()
+    found = False
+
+    for qlid, rec in data.items():
+        if rec.get("telegram_id") == tg_id:
+            rec["transportadora_padrao"] = nome
+            data[qlid] = rec
+            found = True
+            break
+
+    if found:
+        _save_users(data)
+
+    return found
+
+
+def user_get_config_by_tg(tg_id: int) -> dict:
+    """
+    Retorna o registro do usuário (se cadastrado) ou {}.
+    """
+    _, rec = users_find_by_tg(tg_id)
+    return rec or {}

@@ -119,17 +119,26 @@ def _lp_print(pdf_path: str) -> tuple[bool, str]:
 # ——— Função principal para seu fluxo ———
 async def finalize_minuta_and_print(update, context, *, minuta_pdf_path: str, danfe_paths: Sequence[str] | None):
     """
-    Chame esta função após gerar a MINUTA.
-    - Se MERGE_DANFES_WITH_MINUTA=1, junta DANFEs ao final.
+    Chame esta função após gerar a MINUTA (sem DANFEs).
+
+    Responsabilidades:
+    - Se MERGE_DANFES_WITH_MINUTA=1 e houver DANFEs, junta ao final (na ordem recebida).
+    - Aplica margem extra, se configurado.
     - Envia o PDF final no chat.
-    - Se PRINT_AUTO=1 e autor for admin, imprime via CUPS.
+    - Guarda o caminho em context.user_data['last_minuta_pdf'] (para quem quiser usar).
+    - Se PRINT_AUTO=1 e autor for admin, dispara impressão imediata.
+
+    Não mostra botões de "imprimir agora" aqui.
+    Os botões (sem/com DANFEs) são tratados no bot.py.
     """
-    danfe_paths = danfe_paths or []
+    danfe_paths = list(danfe_paths or [])
     final_pdf = minuta_pdf_path
 
+    # Merge opcional com DANFEs
     if MERGE_DANFES_WITH_MINUTA and danfe_paths:
-        out = Path(minuta_pdf_path).with_name(Path(minuta_pdf_path).stem + "_com_danfes.pdf")
+        out = Path(minuta_pdf_path).with_name(Path(minuta_pdf_path).stem + "_COM_DANFES.pdf")
         try:
+            # merge_pdfs respeita a ordem da lista fornecida
             final_pdf = merge_pdfs([minuta_pdf_path, *danfe_paths], out)
         except Exception as e:
             final_pdf = minuta_pdf_path
@@ -139,28 +148,41 @@ async def finalize_minuta_and_print(update, context, *, minuta_pdf_path: str, da
             except Exception:
                 pass
 
-    # aplica margem (se configurado)
+    # Aplica margem extra (se habilitado)
     final_pdf = _apply_margins_if_needed(final_pdf)
-    await update.effective_message.reply_document(document=open(final_pdf, "rb"))
 
-    # guardar caminho para o callback dos botões
-    context.user_data['last_minuta_pdf'] = final_pdf
+    # Envia o PDF final no chat (minuta com DANFEs, quando houver merge)
+    try:
+        caption = "🧾 Minuta gerada (com DANFEs anexadas)." if final_pdf != minuta_pdf_path else "🧾 Minuta gerada."
+        await update.effective_message.reply_document(
+            document=open(final_pdf, "rb"),
+            caption=caption,
+        )
+    except Exception:
+        # Não derruba o fluxo se falhar só no envio do arquivo
+        pass
 
-    # perguntar se deseja imprimir (apenas admins) quando PRINT_AUTO=0
-    from services.print_integration import PRINT_ENABLE, PRINT_AUTO, is_admin
-    if PRINT_ENABLE and (not PRINT_AUTO) and is_admin(update):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🖨️ Imprimir minuta", callback_data="printminuta:yes"),
-            InlineKeyboardButton("❌ Não imprimir",     callback_data="printminuta:no")]
-        ])
-        await update.effective_message.reply_text("Deseja imprimir a minuta agora?", reply_markup=kb)
+    # Guarda para possíveis callbacks externos (botões no bot.py)
+    context.user_data["last_minuta_pdf"] = final_pdf
 
-
+    # Impressão automática (sem teclado), se habilitado e admin
     if PRINT_ENABLE and PRINT_AUTO and is_admin(update):
         ok, msg = _lp_print(str(final_pdf))
-        await update.effective_message.reply_text(f"Impressão: {'OK' if ok else 'ERRO'} — {msg}")
+        try:
+            await update.effective_message.reply_text(
+                f"Impressão automática: {'OK' if ok else 'ERRO'} — {msg}"
+            )
+        except Exception:
+            pass
     elif PRINT_ENABLE and PRINT_AUTO and not is_admin(update):
-        await update.effective_message.reply_text("PDF gerado. Impressão automática restrita a admins.")
+        try:
+            await update.effective_message.reply_text(
+                "PDF gerado. Impressão automática restrita a administradores."
+            )
+        except Exception:
+            pass
+
+    return final_pdf
 
 # ——— Comandos utilitários ———
 async def meuid_cmd(update, context):
