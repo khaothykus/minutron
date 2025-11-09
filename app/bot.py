@@ -55,6 +55,9 @@ from services import transportadora_db
 from services.storage import user_set_transportadora_padrao
 from telegram.ext import MessageHandler, filters
 
+# === Configurações extras de comportamento ===
+ENABLE_TRANSPORTADORA_PAINEL = False  # se True, mostra no painel a transportadora em uso
+
 # =========================================
 # LOGGING BÁSICO (vai pro journal)
 # =========================================
@@ -542,10 +545,11 @@ async def handle_tp_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st.pop("pending_tp_scenario", None)
 
     # 🔹 atualiza painel para exibir a transportadora em uso
-    # try:
-    #     await panel_upsert(context, update.effective_chat.id, st)
-    # except Exception:
-    #     pass
+    if ENABLE_TRANSPORTADORA_PAINEL:
+        try:
+            await panel_upsert(context, update.effective_chat.id, st)
+        except Exception:
+            pass
 
     await step_replace(
         context,
@@ -1959,11 +1963,12 @@ async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAU
         except Exception:
             pass
 
-        # atualiza painel com a transportadora escolhida
-        try:
-            await panel_upsert(context, chat_id, st)
-        except Exception:
-            pass
+        # atualiza painel com a transportadora escolhida (se ativado)
+        if ENABLE_TRANSPORTADORA_PAINEL:
+            try:
+                await panel_upsert(context, chat_id, st)
+            except Exception:
+                pass
 
         # mensagem opcional de confirmação (temporária)
         if msg_confirm:
