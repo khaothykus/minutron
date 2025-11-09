@@ -89,9 +89,21 @@ ADMIN_TELEGRAM_ID=
 BASE_DATA_DIR=/home/pi/minutron/data
 TEMPLATE_PATH=/home/pi/minutron/app/templates/minuta_template.xlsx
 
-# Painel: mostra "✅ Lote finalizado" e apaga depois de 20s
+# DANFE_EMITENTE_REGEX=NCR\s+BRASIL\s+LTDA
+
+# Painel: mostra "✅ Lote finalizado" e apaga depois de 20s (recomendado)
 PANEL_CLEANUP_MODE=finalize
 PANEL_CLEANUP_TTL=20
+
+#OU
+
+# Apaga o painel imediatamente ao final
+# PANEL_CLEANUP_MODE=delete
+
+# OU
+
+# Mantém o painel no chat (não apaga nem troca o texto)
+#PANEL_CLEANUP_MODE=keep
 
 # Impressão A4 via CUPS
 PRINT_ENABLE=1
@@ -99,8 +111,12 @@ PRINT_PRINTER_NAME=EPSON_L4150
 PRINT_COPIES=1
 PRINT_OPTIONS=media=A4
 PRINT_AUTO=0
+
+# deixa tudo pronto pra não cortar bordas
 PRINT_ADD_MARGIN_MM=
 PRINT_FIT_TO_PAGE=1
+
+# ——— admins (user_id e/ou chat_id, separados por vírgula) ———
 PRINT_ADMIN_CHAT_IDS=
 
 # Merge (minuta + DANFEs)
@@ -131,11 +147,17 @@ RAT_SAVE_ARTIFACTS=0
 RAT_ARTIFACTS_DIR=/home/pi/minutron/data/rat_artifacts
 
 # Concurrency
+# 0 = auto (reservado p/ patch 2/2 de parse paralelo)
 PARSE_WORKERS=0
+# pode testar 6~8 se o Pi estiver folgado
 RAT_CONCURRENCY=6
 INGEST_CONCURRENCY=6
 DANFE_CACHE_ENABLED=1
 DANFE_CACHE_DIR=/home/pi/minutron/data/cache/danfe
+
+PREVIEW_ENABLED=1
+PREVIEW_PAGES=1
+PREVIEW_DPI=90
 
 # LOGO overlay
 LOGO_HEADER_PATH=/home/pi/minutron/app/templates/logo.png
@@ -167,15 +189,18 @@ TZ=America/Sao_Paulo
 LABELS_ENABLED=1
 LABEL_ADMIN_ONLY=1
 
-# Se estiver plugada direto no Pi:
-LABEL_DEVICE=/dev/usb/lp0
+# Saída (USB direto; deixe LABEL_PRINTER vazio se não for usar CUPS)
+# LABEL_DEVICE=/dev/usb/lp0
+LABEL_DEVICE=
 # ou se for CUPS:
-LABEL_PRINTER=
+LABEL_PRINTER=ELGIN_L42PRO_FULL
 
 # Tamanho de mídia
 LABEL_WIDTH_MM=94
 LABEL_HEIGHT_MM=70
 LABEL_GAP_MM=2
+
+# 1 = imprime "de baixo pra cima" (o que funcionou pra você)
 LABEL_DIRECTION=1
 
 # Qualidade/velocidade
@@ -186,23 +211,23 @@ LABEL_DENSITY=12
 LABEL_FONT_NAME=4
 LABEL_FONT_SCALE=1
 
-# Centralização horizontal dos textos
+# Centralização horizontal dos TEXTOS (negativo = vai pra ESQUERDA; positivo = DIREITA)
 LABEL_TEXT_CENTER_OFFSET_MM=-11.0
 
-# Alturas
-LABEL_Y_SAP_MM=23
-LABEL_Y_OCORR_MM=35
-LABEL_Y_PECA_MM=49
+# Alturas (a partir do TOPO da etiqueta)
+LABEL_Y_SAP_MM=23                   # “CÓDIGO TÉCNICO SAP”
+LABEL_Y_OCORR_MM=35                 # “Nº OCORRÊNCIA”
+LABEL_Y_PECA_MM=49                  # “PEÇA RETIRADA”
 
-# Linha dos status
-LABEL_Y_STATUS_MM=65
-LABEL_X_GOOD_MM=12
+# Linha dos status (um “X” no lugar certo)
+LABEL_Y_STATUS_MM=65                # altura aprovada
+LABEL_X_GOOD_MM=12                  # centros dos parênteses
 LABEL_X_BAD_MM=34
 LABEL_X_DOA_MM=57
 
-# Conteúdos fixos
+# Conteúdos fixos/úteis
 LABEL_CODIGO_TECNICO=20373280
-LABEL_COPIES_PER_QTY=1
+LABEL_COPIES_PER_QTY=1              # 1 etiqueta por unidade (o bot multiplica pela qtde)
 
 # Ajustes finos
 SHIFT_X_GLOBAL=0
@@ -215,6 +240,14 @@ SHIFT_X_OCORR=0
 SHIFT_Y_OCORR=0
 SHIFT_X_PROD=0
 SHIFT_Y_PROD=0
+
+# Transportadora
+# TRANSPORTADORA_PADRAO=RODONAVES TRANSP E ENCOMENDAS LTDA
+
+# Modo:
+# - always_env -> SEMPRE usar a TRANSPORTADORA_PADRAO na minuta
+# - auto       -> usar lógica inteligente com base nas NFs + PADRAO
+# TRANSPORTADORA_MODE=auto
 ENV
 fi
 sudo dos2unix "${APP_DIR}/.env" >/dev/null 2>&1 || true
