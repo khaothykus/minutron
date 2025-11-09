@@ -1199,13 +1199,17 @@ async def on_print_minuta_cb(update, context):
                 try:
                     from services.print_integration import _lp_print, PRINT_ENABLE, is_admin
 
-                    if PRINT_ENABLE and is_admin(cq):
-                        _lp_print(pdf_path)
-                        msg_txt = "🖨️ Minuta enviada para impressão."
+                    # usa o shim para compatibilizar CallbackQuery com is_admin()
+                    if PRINT_ENABLE and is_admin(_CQUpdateShim(cq)):
+                        ok, resp = _lp_print(pdf_path)
+                        if ok:
+                            msg_txt = "🖨️ Minuta enviada para impressão."
+                        else:
+                            msg_txt = f"⚠️ Erro ao enviar para impressão: {resp}"
                     else:
                         msg_txt = "⚠️ Impressão não está habilitada ou você não é admin."
-                except Exception:
-                    msg_txt = "⚠️ Falha ao enviar a minuta para impressão."
+                except Exception as e:
+                    msg_txt = f"⚠️ Falha ao enviar a minuta para impressão: {e}"
             else:
                 msg_txt = "⚠️ Não encontrei o PDF da minuta para impressão."
 

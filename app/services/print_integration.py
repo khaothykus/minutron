@@ -100,7 +100,14 @@ def _lp_print(pdf_path: str) -> tuple[bool, str]:
         return False, "PRINT_ENABLE=0"
     if not PRINT_PRINTER_NAME:
         return False, "PRINT_PRINTER_NAME não definido"
+
     cmd = ["lp", "-d", PRINT_PRINTER_NAME, "-n", str(PRINT_COPIES)]
+
+    # === NOVO: força ordem de impressão normal ou reversa ===
+    # Se quiser inverter, defina PRINT_REVERSE_ORDER=1 no .env
+    if os.getenv("PRINT_REVERSE_ORDER", "0") == "1":
+        cmd.extend(["-o", "outputorder=reverse"])
+
     eff_options = PRINT_OPTIONS
     if PRINT_FIT_TO_PAGE and ("fit-to-page" not in eff_options):
         eff_options = (eff_options + " fit-to-page").strip()
@@ -108,6 +115,7 @@ def _lp_print(pdf_path: str) -> tuple[bool, str]:
         for opt in shlex.split(eff_options):
             cmd.extend(["-o", opt])
     cmd.append(pdf_path)
+
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, check=False)
         ok = r.returncode == 0
@@ -115,6 +123,7 @@ def _lp_print(pdf_path: str) -> tuple[bool, str]:
         return ok, msg or ("ok" if ok else "erro desconhecido")
     except Exception as e:
         return False, f"falha ao executar lp: {e}"
+
 
 # ——— Função principal para seu fluxo ———
 async def finalize_minuta_and_print(update, context, *, minuta_pdf_path: str, danfe_paths: Sequence[str] | None):
