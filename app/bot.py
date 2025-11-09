@@ -250,12 +250,21 @@ def _stats_text(st: dict) -> str:
         "📊 **Status do lote**",
         f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
-    # Data/Volumes (mostra só se já tiverem sido definidos)
+
+    # Data / Volumes (se já definidos)
     data_iso = st.get("data")
     vols = st.get("volumes")
     if data_iso or vols is not None:
         linhas.append(f"📅 Data escolhida: {_fmt_br_date(data_iso)}")
         linhas.append(f"📦 Volumes: {vols if vols is not None else '—'}")
+
+    # # Transportadora em uso (se já decidida para este lote)
+    # tp = (st.get("transportadora_escolhida") or "").strip()
+    # if tp:
+    #     # linhas.append(f"🚚 Transportadora em uso: {tp}")
+    #     linhas.append(f"🚚 Transportadora: {tp}")
+
+
     return "\n".join(linhas)
 
 
@@ -331,11 +340,18 @@ def _panel_finalize_text(st: dict) -> str:
         "✅ **Lote finalizado**",
         f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
     ]
+
     data_iso = st.get("data")
     vols = st.get("volumes")
     if data_iso or vols is not None:
         linhas.append(f"📅 Data escolhida: {_fmt_br_date(data_iso)}")
         linhas.append(f"📦 Volumes: {vols if vols is not None else '—'}")
+
+    # tp = (st.get("transportadora_escolhida") or "").strip()
+    # if tp:
+    #     # linhas.append(f"🚚 Transportadora usada na minuta: {tp}")
+    #     linhas.append(f"🚚 Transportadora: {tp}")
+
     return "\n".join(linhas)
 
 async def panel_cleanup(context, chat_id: int, st: dict, mode: str = "finalize", ttl: int = 20):
@@ -525,6 +541,12 @@ async def handle_tp_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["waiting_tp_choice"] = False
     st.pop("pending_tp_scenario", None)
 
+    # 🔹 atualiza painel para exibir a transportadora em uso
+    # try:
+    #     await panel_upsert(context, update.effective_chat.id, st)
+    # except Exception:
+    #     pass
+
     await step_replace(
         context,
         update.effective_chat.id,
@@ -610,9 +632,9 @@ async def cmd_set_transportadora(update: Update, context: ContextTypes.DEFAULT_T
 
     if not args:
         await update.message.reply_text(
-            "Uso: /settransportadora NOME_DA_TRANSPORTADORA\n\n"
+            "Uso: /transportadora NOME_DA_TRANSPORTADORA\n\n"
             "Exemplo:\n"
-            "/settransportadora MINHA TRANSPORTADORA LTDA"
+            "/transportadora MINHA TRANSPORTADORA LTDA"
         )
         return
 
@@ -1864,9 +1886,9 @@ async def processar_lote(cq, context, st, volumes: int):
             sess.pop(k, None)
 
 
-
 async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # from services.storage import user_set_transportadora_padrao
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
     cq = update.callback_query
     await cq.answer()
 
@@ -1877,76 +1899,105 @@ async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAU
     data = cq.data or ""
     sid = st.get("pending_tp_sid")
     if not sid:
-        await cq.message.edit_text("Esse lote não está mais ativo. Envie as DANFEs novamente.")
+        try:
+            await cq.message.edit_text("Esse lote não está mais ativo. Envie as DANFEs novamente.")
+        except Exception:
+            pass
         return
 
     volumes = st.get("pending_tp_volumes") or 1
     scenario = st.get("pending_tp_scenario")
     opcoes = st.get("pending_tp_opcoes") or []
     escolhida_sugerida = st.get("pending_tp_escolhida")
+    nf_tp = (st.get("pending_tp_nf") or "").strip()
+
+    # Config do usuário
     user_cfg = storage.user_get_config_by_tg(uid)
     padrao = (user_cfg.get("transportadora_padrao") or "").strip()
 
-    # Normaliza o padrão do usuário usando o banco (se existir versão mais completa)
+    # Normaliza o padrão com base no DB (usa nome mais completo se existir)
     if padrao:
-        # from services import transportadora_db
         sugerido = transportadora_db.best_match(padrao)
-        if sugerido and sugerido.strip().upper() != padrao.upper():
-            # from services.storage import user_set_transportadora_padrao
+        if sugerido:
             novo = sugerido.strip().upper()
-            user_set_transportadora_padrao(uid, novo)
-            padrao = novo
-            user_cfg["transportadora_padrao"] = novo
+            if novo and novo != padrao.upper():
+                user_set_transportadora_padrao(uid, novo)
+                padrao = novo
+                user_cfg["transportadora_padrao"] = novo
 
-    # ===== CENÁRIO A: padrão já existe x NF diferente =====
-    if scenario == "single_diff":
-        nf_tp = (st.get("pending_tp_nf") or "").strip()
-
-        if data == "tp_use_default" and padrao:
-            nome = padrao
-            st["transportadora_escolhida"] = nome
+    async def _finalizar_escolha(nome: str, msg_confirm: str | None = None):
+        """
+        Define transportadora escolhida para o lote atual,
+        limpa estado temporário, atualiza painel, apaga botões e
+        continua o processar_lote.
+        """
+        nome = (nome or "").strip()
+        if not nome:
+            try:
+                await cq.message.edit_text("Transportadora inválida. Envie as DANFEs novamente.")
+            except Exception:
+                pass
             st["waiting_tp_choice"] = False
-
-            for k in ("pending_tp_sid", "pending_tp_volumes", "pending_tp_scenario", "pending_tp_nf"):
+            for k in ("pending_tp_sid", "pending_tp_volumes",
+                      "pending_tp_scenario", "pending_tp_nf",
+                      "pending_tp_opcoes", "pending_tp_escolhida"):
                 st.pop(k, None)
+            return
 
-            await cq.message.edit_text(
-                f"✅ Usando sua transportadora padrão:\n<b>{nome}</b>",
-                parse_mode="HTML",
+        # grava no estado
+        st["transportadora_escolhida"] = nome
+        st["waiting_tp_choice"] = False
+
+        for k in ("pending_tp_sid", "pending_tp_volumes",
+                  "pending_tp_scenario", "pending_tp_nf",
+                  "pending_tp_opcoes", "pending_tp_escolhida"):
+            st.pop(k, None)
+
+        # apaga a mensagem com os botões (pra não ficar lixo no chat)
+        try:
+            await cq.message.delete()
+        except Exception:
+            pass
+
+        # atualiza painel com a transportadora escolhida
+        try:
+            await panel_upsert(context, chat_id, st)
+        except Exception:
+            pass
+
+        # mensagem opcional de confirmação (temporária)
+        if msg_confirm:
+            try:
+                await send_temp(context, chat_id, msg_confirm, seconds=8)
+            except Exception:
+                pass
+
+        # segue o fluxo do lote com a transportadora definida
+        await processar_lote(cq, context, st, volumes)
+
+    # =========================
+    # CENÁRIO A: single_diff
+    # =========================
+    if scenario == "single_diff":
+        if data == "tp_use_default" and padrao:
+            await _finalizar_escolha(
+                padrao,
+                f"✅ Usando sua transportadora padrão:\n{padrao}",
             )
-            st["step_msg_id"] = cq.message.message_id
-
-            await processar_lote(cq, context, st, volumes)
             return
 
         if data == "tp_use_nf" and nf_tp:
-            # usa a da NF só neste lote (não muda padrão)
-            nome = nf_tp
-            st["transportadora_escolhida"] = nome
-            st["waiting_tp_choice"] = False
-
-            for k in ("pending_tp_sid", "pending_tp_volumes", "pending_tp_scenario", "pending_tp_nf"):
-                st.pop(k, None)
-
-            await cq.message.edit_text(
-                f"✅ Usando a transportadora da NF apenas nesta minuta:\n<b>{nome}</b>",
-                parse_mode="HTML",
+            await _finalizar_escolha(
+                nf_tp,
+                f"✅ Usando a transportadora da NF apenas nesta minuta:\n{nf_tp}",
             )
-            st["step_msg_id"] = cq.message.message_id
-
-            # texto = f"✅ Usando a transportadora da NF apenas nesta minuta:\n<b>{nome}</b>"
-            # try:
-            #     await send_temp(context, cq.message.chat.id, texto, seconds=10, parse_mode="HTML")
-            # except TypeError:
-            #     # se sua send_temp não aceitar parse_mode, manda simples
-            #     await send_temp(context, cq.message.chat.id, texto, seconds=10)
-
-            await processar_lote(cq, context, st, volumes)
             return
 
-    # ===== CENÁRIO B: escolher e salvar padrão =====
+    # =========================
+    # CENÁRIO B: choose_padrao
+    # =========================
     if scenario == "choose_padrao":
-        # usuário escolheu uma das opções sugeridas
+        # escolheu uma das sugeridas
         if data.startswith("set_tp_") and data != "set_tp_other":
             try:
                 idx = int(data.replace("set_tp_", ""))
@@ -1954,39 +2005,28 @@ async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAU
             except Exception:
                 nome = ""
 
-            nome = nome.strip()
-            if not nome:
-                await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+            if not nome.strip():
+                try:
+                    await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+                except Exception:
+                    pass
                 return
 
             user_set_transportadora_padrao(uid, nome)
             transportadora_db.add(nome)
 
-            st["transportadora_escolhida"] = nome
-            st["waiting_tp_choice"] = False
-
-            for k in ("pending_tp_opcoes", "pending_tp_escolhida",
-                      "pending_tp_sid", "pending_tp_volumes",
-                      "pending_tp_scenario"):
-                st.pop(k, None)
-
-            await cq.message.edit_text(
-                f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
-                "Gerando a minuta com esta transportadora.",
-                parse_mode="HTML",
+            await _finalizar_escolha(
+                nome,
+                f"✅ Transportadora padrão definida como:\n{nome}\n\nGerando a minuta com esta transportadora.",
             )
-            # st["step_msg_id"] = cq.message.message_id
-
-            await processar_lote(cq, context, st, volumes)
             return
 
-        # botão "Outra transportadora..."
+        # "Outra transportadora..."
         if data == "set_tp_other":
-            # from services import transportadora_db as tpdb
             lista = transportadora_db.all()
 
             if lista:
-                # primeiro tenta ajudar com as que já conhece
+                # próximo passo: escolher a partir do DB
                 st["pending_tp_scenario"] = "choose_padrao_db"
 
                 botoes = []
@@ -2004,29 +2044,36 @@ async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAU
                     )
                 ])
 
-                await cq.message.edit_text(
-                    "Selecione sua transportadora na lista abaixo ou escolha digitar o nome:",
-                    reply_markup=InlineKeyboardMarkup(botoes),
-                )
-                # st["step_msg_id"] = cq.message.message_id
+                try:
+                    await cq.message.edit_text(
+                        "Selecione sua transportadora na lista abaixo ou escolha digitar o nome:",
+                        reply_markup=InlineKeyboardMarkup(botoes),
+                    )
+                except Exception:
+                    pass
                 return
 
-            # se não tem nada no DB ainda, já entra direto em modo manual
+            # se DB vazio, vai direto para manual
             st["waiting_tp_manual"] = True
             st["waiting_tp_choice"] = False
-            await cq.message.edit_text(
-                "Digite abaixo o nome da sua transportadora padrão:"
-            )
+            st.pop("pending_tp_scenario", None)
+
+            try:
+                await cq.message.edit_text(
+                    "Digite abaixo o nome da sua transportadora padrão:"
+                )
+            except Exception:
+                pass
             st["step_msg_id"] = cq.message.message_id
             return
 
-
-    # ===== CENÁRIO C: escolher a partir do DB =====
+    # =========================
+    # CENÁRIO C: choose_padrao_db
+    # =========================
     if scenario == "choose_padrao_db":
-        # from services import transportadora_db as tpdb
         lista = transportadora_db.all()
 
-        # clique numa opção da lista
+        # escolheu uma das do DB
         if data.startswith("tpdb_") and data != "tpdb_manual":
             try:
                 idx = int(data.replace("tpdb_", ""))
@@ -2034,47 +2081,50 @@ async def cb_escolher_transportadora(update: Update, context: ContextTypes.DEFAU
             except Exception:
                 nome = ""
 
-            nome = (nome or "").strip()
-            if not nome:
-                await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+            if not nome.strip():
+                try:
+                    await cq.message.edit_text("Transportadora inválida. Gere a minuta novamente.")
+                except Exception:
+                    pass
                 return
 
             user_set_transportadora_padrao(uid, nome)
             transportadora_db.add(nome)
 
-            st["transportadora_escolhida"] = nome
-            st["waiting_tp_choice"] = False
-
-            for k in ("pending_tp_opcoes", "pending_tp_escolhida",
-                      "pending_tp_sid", "pending_tp_volumes",
-                      "pending_tp_scenario"):
-                st.pop(k, None)
-
-            await cq.message.edit_text(
-                f"✅ Transportadora padrão definida como:\n<b>{nome}</b>\n\n"
-                "Gerando a minuta com esta transportadora.",
-                parse_mode="HTML",
+            await _finalizar_escolha(
+                nome,
+                f"✅ Transportadora padrão definida como:\n{nome}\n\nGerando a minuta com esta transportadora.",
             )
-            await processar_lote(cq, context, st, volumes)
             return
 
-        # clique em "Nenhuma destas (digitar nome)"
+        # "Nenhuma destas (digitar nome)"
         if data == "tpdb_manual":
-            # Vamos aceitar o próximo texto como nome manual
             st["waiting_tp_manual"] = True
             st["waiting_tp_choice"] = False
-            # mantemos pending_tp_sid / pending_tp_volumes para poder retomar o lote
             st.pop("pending_tp_scenario", None)
 
-            await cq.message.edit_text(
-                "Digite abaixo o nome da sua transportadora padrão:"
-            )
+            try:
+                await cq.message.edit_text(
+                    "Digite abaixo o nome da sua transportadora padrão:"
+                )
+            except Exception:
+                pass
             st["step_msg_id"] = cq.message.message_id
             return
 
-    # fallback
-    await cq.message.edit_text("Fluxo inválido ou expirado. Envie as DANFEs novamente.")
-    # st["step_msg_id"] = cq.message.message_id
+    # =========================
+    # Fallback
+    # =========================
+    st["waiting_tp_choice"] = False
+    for k in ("pending_tp_sid", "pending_tp_volumes",
+              "pending_tp_scenario", "pending_tp_nf",
+              "pending_tp_opcoes", "pending_tp_escolhida"):
+        st.pop(k, None)
+
+    try:
+        await cq.message.edit_text("Fluxo inválido ou expirado. Envie as DANFEs novamente.")
+    except Exception:
+        pass
 
 
 # ===== MAIN =====
@@ -2097,7 +2147,7 @@ def main():
     app.add_handler(CommandHandler("usuarios", admin_usuarios))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CommandHandler("health", cmd_health))
-    app.add_handler(CommandHandler("settransportadora", cmd_set_transportadora))
+    app.add_handler(CommandHandler("transportadora", cmd_set_transportadora))
     app.add_handler(CallbackQueryHandler(
         cb_escolher_transportadora,
         pattern=r"^(set_tp_|tp_use_|tpdb_)"
