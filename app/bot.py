@@ -251,7 +251,7 @@ def _stats_text(st: dict) -> str:
     s = st.setdefault("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "📊 **Status do lote**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']}  | ❌ Inválidos: {s['bad']}",
     ]
 
     # Data / Volumes (se já definidos)
@@ -341,7 +341,7 @@ def _panel_finalize_text(st: dict) -> str:
     s = st.get("stats", {"recv": 0, "ok": 0, "dup": 0, "bad": 0})
     linhas = [
         "✅ **Lote finalizado**",
-        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']} | ❌ Inválidos: {s['bad']}",
+        f"📥 Recebidos: {s['recv']} | ✅ Válidos: {s['ok']} \n♻️ Repetidos: {s['dup']}  | ❌ Inválidos: {s['bad']}",
     ]
 
     data_iso = st.get("data")
