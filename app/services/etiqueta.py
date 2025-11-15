@@ -187,6 +187,8 @@ def imprimir_etiqueta(codigo_tecnico: str, ocorrencia: str, codigo_produto: str,
 
     _send_to_printer(payload)
 
+LABEL_OCORR_PLACEHOLDER = _env_str("LABEL_OCORR_PLACEHOLDER", "-----")
+
 def print_batch(items: Iterable[Dict[str, Any]]) -> int:
     """
     Imprime uma lista de itens.
@@ -197,6 +199,11 @@ def print_batch(items: Iterable[Dict[str, Any]]) -> int:
     for it in items:
         codigo_prod = it.get("codigo_prod") or it.get("codigo_produto") or ""
         ocorr = it.get("ocorrencia") or ""
+
+        # 🔹 Quando vier sem ocorrência (bot manda "-"), usamos vários hífens só na etiqueta
+        if ocorr.strip() == "-":
+            ocorr = LABEL_OCORR_PLACEHOLDER  # ex: "-----"
+
         status = (it.get("status") or "").lower()
         qtde = int(it.get("qtde") or 1)
         copias = max(1, qtde * _env_int("LABEL_COPIES_PER_QTY", 1))

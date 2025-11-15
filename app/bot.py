@@ -1630,7 +1630,20 @@ async def processar_lote(cq, context, st, volumes: int):
             key = (p["ocorrencia"], p["codigo_prod"])
             rat = _rat_cache.get(key)
 
-            if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
+            # if p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
+            status = (p.get("status") or "").upper()
+
+            # Regra nova: DOA → não chama RAT nunca
+            if status == "DOA":
+                rat = "DOA"
+            
+            # Regra nova: BOM → não chama RAT nunca
+            elif status == "BOM":
+                rat = "GOOD"
+
+            # Só busca RAT se não for DOA ou BOM
+            elif p["ocorrencia"] and p["ocorrencia"] != "-" and not rat:
+
                 try:
                     rat = await asyncio.wait_for(
                         asyncio.to_thread(get_rat_for_ocorrencia, p["ocorrencia"], p["codigo_prod"]),
@@ -1643,12 +1656,14 @@ async def processar_lote(cq, context, st, volumes: int):
 
             # Fallbacks
             if not rat:
-                s = (p.get("status") or "").upper()
-                if s == "BOM":
-                    rat = "GOOD"
-                elif s == "DOA":
-                    rat = "DOA"
-                elif s == "RUIM":
+                # s = (p.get("status") or "").upper()
+
+                # if status == "BOM":
+                #     rat = "GOOD"
+                # elif status == "DOA":
+                #     rat = "DOA"
+                # elif status == "RUIM":
+                if status == "RUIM":
                     rat = ""
                 else:
                     rat = "-"

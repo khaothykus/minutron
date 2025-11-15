@@ -230,6 +230,8 @@ LABEL_X_DOA_MM=57
 LABEL_CODIGO_TECNICO=20373280
 LABEL_COPIES_PER_QTY=1              # 1 etiqueta por unidade (o bot multiplica pela qtde)
 
+LABEL_OCORR_PLACEHOLDER=-----        # placeholder p/ nº ocorrência VAZIO
+
 # Ajustes finos
 SHIFT_X_GLOBAL=0
 SHIFT_Y_GLOBAL=0
